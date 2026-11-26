@@ -56,6 +56,9 @@ type Report struct {
 	// AllowedFailures counts the failed jobs left out because they are
 	// allowed to fail (see --include-allowed).
 	AllowedFailures int `json:"allowed_failures,omitempty"`
+	// Truncated is true when a pipeline had more jobs (1000) or trigger
+	// jobs (500) than were read: failed jobs may be missing.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // Options tune the report.
@@ -105,10 +108,11 @@ func projectFromURL(u string) string {
 
 func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, depth int, o Options) error {
 	base := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id)
-	jobs, _, err := gitlab.GetAll[gitlab.Job](ctx, c, base+"/jobs", nil, 10)
+	jobs, truncated, err := gitlab.GetAll[gitlab.Job](ctx, c, base+"/jobs", nil, 10)
 	if err != nil {
 		return err
 	}
+	r.Truncated = r.Truncated || truncated
 	for _, j := range jobs {
 		if j.Status != "failed" {
 			continue
@@ -125,10 +129,11 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, 
 	if !o.Downstream || depth >= o.MaxDepth {
 		return nil
 	}
-	bridges, _, err := gitlab.GetAll[gitlab.Bridge](ctx, c, base+"/bridges", nil, 5)
+	bridges, truncated, err := gitlab.GetAll[gitlab.Bridge](ctx, c, base+"/bridges", nil, 5)
 	if err != nil {
 		return err
 	}
+	r.Truncated = r.Truncated || truncated
 	for _, b := range bridges {
 		if b.DownstreamPipeline == nil {
 			if !mr.Finished(b.Status) && b.Status != "created" {
@@ -230,17 +235,27 @@ func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int)
 }
 
 // ForMR finds the pipeline of a merge request for sha (its head when
-// empty). It returns 0 when GitLab has not created it yet.
+// empty): the head pipeline when it ran on that commit or on a
+// merged-results or merge-train commit of it, else the newest pipeline of
+// the merge request on that commit. It returns 0 when GitLab has not
+// created it yet.
 func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (id int, headSHA string, err error) {
 	var m gitlab.MergeRequest
 	if err := c.Get(ctx, mr.Base(r), nil, &m); err != nil {
 		return 0, "", err
 	}
-	if sha == "" {
+	if sha == "" || strings.HasPrefix(m.SHA, sha) {
 		sha = m.SHA
+		isHead, err := mr.PipelineIsHead(ctx, c, m)
+		if err != nil {
+			return 0, sha, err
+		}
+		if isHead {
+			return m.HeadPipeline.ID, sha, nil
+		}
 	}
 	if hp := m.HeadPipeline; hp != nil && strings.HasPrefix(hp.SHA, sha) {
-		return hp.ID, hp.SHA, nil
+		return hp.ID, sha, nil
 	}
 	var list []gitlab.PipelineRef
 	if err := c.Get(ctx, mr.Base(r)+"/pipelines", url.Values{"per_page": {"20"}}, &list); err != nil {

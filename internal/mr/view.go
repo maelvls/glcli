@@ -54,7 +54,8 @@ type PipelineView struct {
 	Status string `json:"status"`
 	URL    string `json:"url"`
 	SHA    string `json:"sha,omitempty"`
-	// Stale is true when the pipeline ran on another commit than the head.
+	// Stale is true when the pipeline did not run on the head commit (nor on
+	// a merged-results commit of it): a push came after it.
 	Stale bool `json:"stale,omitempty"`
 }
 
@@ -118,7 +119,7 @@ func NewView(s *Snapshot, p People, o ViewOptions) View {
 	}
 	v.Approvals.ApprovedByMe = slices.Contains(v.Approvals.ApprovedBy, p.Me)
 	if hp := m.HeadPipeline; hp != nil {
-		v.Pipeline = &PipelineView{ID: hp.ID, Status: hp.Status, URL: hp.WebURL, SHA: hp.SHA, Stale: hp.SHA != "" && hp.SHA != m.SHA}
+		v.Pipeline = &PipelineView{ID: hp.ID, Status: hp.Status, URL: hp.WebURL, SHA: hp.SHA, Stale: !s.PipelineIsHead}
 	}
 	for _, d := range s.Discussions {
 		if len(d.Notes) == 0 {

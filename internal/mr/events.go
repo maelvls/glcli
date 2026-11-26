@@ -151,7 +151,13 @@ func (d *Differ) Events(ctx context.Context, prev Cursor, s *Snapshot) ([]Event,
 			}
 		}
 		if e.RebaseOnly == nil || !*e.RebaseOnly {
-			commits, err := d.newCommits(ctx, s, prev.SHA)
+			// After a rebase every commit is new; from the old head, the
+			// list would also hold the target branch's commits.
+			from := prev.SHA
+			if e.BaseMoved && len(s.Versions) > 0 {
+				from = s.Versions[0].BaseCommitSHA
+			}
+			commits, err := d.newCommits(ctx, s, from)
 			if err == nil {
 				e.Commits = commits
 			}
@@ -199,12 +205,21 @@ func (d *Differ) Events(ctx context.Context, prev Cursor, s *Snapshot) ([]Event,
 		}
 		events = append(events, e)
 	}
-	for id, dsc := range threads {
+	for i := range s.Discussions {
+		dsc := &s.Discussions[i]
 		first := dsc.Notes
-		if len(first) == 0 || !first[0].Resolvable || first[0].Resolved || first[0].ID > prev.MaxNote || slices.Contains(prev.Unresolved, id) {
+		if len(first) == 0 || !first[0].Resolvable || first[0].Resolved || first[0].ID > prev.MaxNote || slices.Contains(prev.Unresolved, shortID(dsc.ID)) {
 			continue
 		}
-		events = append(events, Event{Kind: "unresolved", Thread: d.threadRef(m.WebURL, dsc)})
+		// GitLab does not say who reopened a thread: credit the author of
+		// its newest note since the cursor, if any (a reply that reopens).
+		e := Event{Kind: "unresolved", Thread: d.threadRef(m.WebURL, dsc)}
+		for _, n := range dsc.Notes {
+			if n.ID > prev.MaxNote && !n.System {
+				e.By, e.Mine = n.Author.Username, n.Author.Username == d.People.Me
+			}
+		}
+		events = append(events, e)
 	}
 
 	// Approvals.
@@ -243,7 +258,7 @@ func (d *Differ) Events(ctx context.Context, prev Cursor, s *Snapshot) ([]Event,
 			}
 			e := Event{
 				Kind: "pipeline", SHA: hp.SHA, PreviousStatus: prevStatus,
-				Pipeline: &PipelineView{ID: hp.ID, Status: hp.Status, URL: hp.WebURL, SHA: hp.SHA, Stale: hp.SHA != m.SHA},
+				Pipeline: &PipelineView{ID: hp.ID, Status: hp.Status, URL: hp.WebURL, SHA: hp.SHA, Stale: !s.PipelineIsHead},
 			}
 			if !hp.UpdatedAt.IsZero() {
 				t := hp.UpdatedAt

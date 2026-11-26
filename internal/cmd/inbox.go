@@ -199,6 +199,7 @@ prints; on timeout, items is [], timed_out is true, and checked_at is the
 			}
 			var res *inboxResult
 			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
+				rt.ResetWarnings()
 				r, items, err := collectInbox(ctx, rt, f)
 				if err != nil {
 					return false, err

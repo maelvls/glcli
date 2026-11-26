@@ -165,6 +165,14 @@ func (r *Runtime) Warnf(format string, args ...any) {
 	r.warnings = append(r.warnings, fmt.Sprintf(format, args...))
 }
 
+// ResetWarnings forgets the warnings not printed yet: a wait command calls
+// it before each poll, so that only the last poll's warnings are printed.
+func (r *Runtime) ResetWarnings() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.warnings = nil
+}
+
 // Hintf adds a hint (what to do next) to the next printed result.
 func (r *Runtime) Hintf(format string, args ...any) {
 	r.mu.Lock()

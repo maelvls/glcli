@@ -218,6 +218,7 @@ type activity struct {
 	reviewReqAt time.Time // last "requested review from @me"
 	repliesAt   time.Time // last human reply in my threads, or mention
 	commentsAt  time.Time // last human comment by someone else
+	approvedAt  time.Time // last approval, by anyone
 	pushedAt    time.Time
 }
 
@@ -231,6 +232,9 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 		for _, n := range d.Notes {
 			if n.Author.Username == me && (!n.System || strings.HasPrefix(n.Body, "approved this merge request") || strings.HasPrefix(n.Body, "added ")) {
 				a.myLast = later(a.myLast, n.CreatedAt)
+			}
+			if n.System && strings.HasPrefix(n.Body, "approved this merge request") {
+				a.approvedAt = later(a.approvedAt, n.CreatedAt)
 			}
 			if n.System && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
 				a.reviewReqAt = later(a.reviewReqAt, n.CreatedAt)
@@ -282,11 +286,20 @@ func authoredItem(s *mr.Snapshot, p mr.People) Item {
 	if a.commentsAt.After(a.myLast) {
 		it.add("new_comments", a.commentsAt)
 	}
-	if hp := s.MR.HeadPipeline; hp != nil && hp.Status == "failed" && hp.SHA == s.MR.SHA {
+	if hp := s.MR.HeadPipeline; hp != nil && hp.Status == "failed" && s.PipelineIsHead {
 		it.add("pipeline_failed", hp.UpdatedAt)
 	}
 	if s.MR.DetailedMergeStatus == "mergeable" && !s.MR.Draft {
-		it.add("ready_to_merge", s.MR.UpdatedAt)
+		// When it became mergeable: the last approval or the head
+		// pipeline finishing, not updated_at, which any edit bumps.
+		at := a.approvedAt
+		if hp := s.MR.HeadPipeline; hp != nil && s.PipelineIsHead {
+			at = later(at, hp.UpdatedAt)
+		}
+		if at.IsZero() {
+			at = s.MR.UpdatedAt
+		}
+		it.add("ready_to_merge", at)
 	}
 	return it
 }
@@ -318,13 +331,22 @@ func (it *Item) add(reason string, at time.Time) {
 	it.Reasons = append(it.Reasons, reason)
 }
 
+// mentions reports whether body mentions @user: not @username, but
+// "@user." at the end of a sentence counts.
 func mentions(body, user string) bool {
-	i := strings.Index(body, "@"+user)
-	if i < 0 {
-		return false
+	tag := "@" + user
+	for from := 0; ; {
+		i := strings.Index(body[from:], tag)
+		if i < 0 {
+			return false
+		}
+		end := from + i + len(tag)
+		if end == len(body) || !isUsernameChar(body[end]) ||
+			(body[end] == '.' && (end+1 == len(body) || !isUsernameChar(body[end+1]))) {
+			return true
+		}
+		from = end
 	}
-	end := i + 1 + len(user)
-	return end == len(body) || !isUsernameChar(body[end])
 }
 
 func isUsernameChar(b byte) bool {

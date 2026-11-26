@@ -60,6 +60,7 @@ func TestReviewReasons(t *testing.T) {
 func TestAuthoredReasons(t *testing.T) {
 	s := snap("me", note(1, "me", 1, "added 1 commit", true), note(2, "alice", 3, "looks wrong", false))
 	s.MR.HeadPipeline = &gitlab.PipelineRef{Status: "failed", SHA: "h", UpdatedAt: at(4)}
+	s.PipelineIsHead = true
 	got := authoredItem(s, me)
 	if !slices.Equal(got.Reasons, []string{"new_comments", "pipeline_failed"}) || !got.At.Equal(at(4)) {
 		t.Errorf("reasons = %v at %v", got.Reasons, got.At)
@@ -68,5 +69,28 @@ func TestAuthoredReasons(t *testing.T) {
 	s.MR.DetailedMergeStatus = "mergeable"
 	if got := authoredItem(s, me); !slices.Equal(got.Reasons, []string{"ready_to_merge"}) {
 		t.Errorf("reasons = %v", got.Reasons)
+	}
+	// ready_to_merge dates from the last approval, not from updated_at.
+	s = snap("me", note(4, "alice", 6, "approved this merge request", true))
+	s.MR.DetailedMergeStatus, s.MR.UpdatedAt = "mergeable", at(50)
+	if got := authoredItem(s, me); !got.At.Equal(at(6)) {
+		t.Errorf("ready_to_merge at %v, want %v", got.At, at(6))
+	}
+}
+
+func TestMentions(t *testing.T) {
+	tests := map[string]bool{
+		"@me":                true,
+		"thanks @me.":        true,
+		"cc @mex and @me":    true,
+		"@me.valais":         false,
+		"@meg":               false,
+		"email me@me.com":    false,
+		"(@me) what do you?": true,
+	}
+	for body, want := range tests {
+		if got := mentions(body, "me"); got != want {
+			t.Errorf("mentions(%q) = %v, want %v", body, got, want)
+		}
 	}
 }

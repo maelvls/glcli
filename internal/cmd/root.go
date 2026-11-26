@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -61,7 +62,7 @@ func run(rt *cli.Runtime, args []string) int {
 		return 124
 	}
 	var usage usageError
-	if errors.As(err, &usage) {
+	if errors.As(err, &usage) || isCobraUsage(err) {
 		fmt.Fprintf(rt.Stderr, "glcli: %v\n", err)
 		return 2
 	}
@@ -70,6 +71,17 @@ func run(rt *cli.Runtime, args []string) int {
 		fmt.Fprintln(rt.Stderr, "glcli: the token was rejected: run `glab auth login --hostname <host>` (glcli reads glab's config), or `glcli auth status`")
 	}
 	return 1
+}
+
+// isCobraUsage recognises the usage errors cobra makes itself: wrong
+// number of arguments, unknown command.
+func isCobraUsage(err error) bool {
+	msg := err.Error()
+	return strings.HasPrefix(msg, "unknown command") ||
+		strings.HasPrefix(msg, "accepts ") ||
+		strings.HasPrefix(msg, "requires at least") ||
+		strings.HasPrefix(msg, "requires at most") ||
+		strings.Contains(msg, " arg(s), received ")
 }
 
 func commandTimeout() time.Duration {

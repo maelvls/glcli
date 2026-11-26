@@ -12,6 +12,8 @@ import (
 // a command line. Events are computed against it, so nothing that happens
 // between two commands is lost.
 type Cursor struct {
+	// MR is "project_id!iid": a cursor is only valid for its merge request.
+	MR      string `json:"m,omitempty"`
 	SHA     string `json:"s"`
 	Version int    `json:"v,omitempty"`
 	// Base is the base commit of the head version: with SHA, it gives
@@ -33,8 +35,9 @@ const idPrefix = 12
 
 // NewCursor captures s.
 func NewCursor(s *Snapshot) Cursor {
-	c := Cursor{SHA: s.MR.SHA, State: s.MR.State, Approvers: s.ApprovedBy()}
-	if len(s.Versions) > 0 {
+	c := Cursor{MR: s.ID(), SHA: s.MR.SHA, State: s.MR.State, Approvers: s.ApprovedBy()}
+	// The base only goes with the head when both come from the same push.
+	if len(s.Versions) > 0 && !s.Unsettled {
 		c.Version = s.Versions[0].ID
 		c.Base = s.Versions[0].BaseCommitSHA
 	}
@@ -65,6 +68,14 @@ func shortID(id string) string {
 func (c Cursor) Encode() string {
 	b, _ := json.Marshal(c)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// Check reports a cursor taken on another merge request.
+func (c Cursor) Check(s *Snapshot) error {
+	if c.MR != "" && c.MR != s.ID() {
+		return fmt.Errorf("--cursor belongs to another merge request (%s, this one is %s): pass the cursor printed for this one", c.MR, s.ID())
+	}
+	return nil
 }
 
 // DecodeCursor parses what Encode produced.

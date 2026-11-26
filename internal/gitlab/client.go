@@ -3,6 +3,8 @@ package gitlab
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +31,19 @@ type Client struct {
 
 // New returns a client for h.
 func New(h config.Host) *Client {
-	return &Client{Host: h, HTTP: &http.Client{Timeout: 60 * time.Second}}
+	return &Client{Host: h, HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: keepTokenOnHost}}
+}
+
+// keepTokenOnHost drops the token when a redirect leaves the host: Go
+// only strips Authorization and cookies, not PRIVATE-TOKEN.
+func keepTokenOnHost(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req.URL.Host != via[0].URL.Host {
+		req.Header.Del("PRIVATE-TOKEN")
+	}
+	return nil
 }
 
 // APIError is a non-2xx answer from GitLab.
@@ -58,6 +72,16 @@ func IsTransient(err error) bool {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500
+	}
+	// A certificate GitLab's host is not trusted with will not fix itself.
+	var (
+		unknownAuthority x509.UnknownAuthorityError
+		hostname         x509.HostnameError
+		invalid          x509.CertificateInvalidError
+		verification     *tls.CertificateVerificationError
+	)
+	if errors.As(err, &unknownAuthority) || errors.As(err, &hostname) || errors.As(err, &invalid) || errors.As(err, &verification) {
+		return false
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {

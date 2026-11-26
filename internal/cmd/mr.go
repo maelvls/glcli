@@ -96,6 +96,9 @@ Prints {ref, url, title, state, ..., cursor, events}.`,
 			if cursor == "" {
 				return rt.Print(out)
 			}
+			if err := prev.Check(s); err != nil {
+				return usageError{err}
+			}
 			d := &mr.Differ{Client: m.client, People: m.people, MaxBodyChars: maxBody}
 			if out.Events, err = d.Events(ctx, prev, s); err != nil {
 				return err
@@ -151,8 +154,9 @@ that did not end the wait, each with its "kind".
 
 It polls every --interval (1m), keeps trying while GitLab cannot be
 reached (closed lid, VPN down), and has no time limit unless --timeout.
-On a merged or closed merge request that --cursor already saw that way,
-it returns at once.
+Once the merge request is merged or closed, it returns whatever --on
+says (nothing more will happen to it), with a hint when nothing in --on
+happened. A cursor from another merge request is refused.
 
 Prints {events, mr, triggered_by}. mr.cursor is the cursor to wait again.
 When --timeout runs out: events [], timed_out true, and mr.cursor is the
@@ -203,6 +207,12 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 				if err != nil {
 					return false, err
 				}
+				if err := prev.Check(s); err != nil {
+					return false, usageError{err}
+				}
+				if s.Unsettled {
+					return false, nil // a push is landing: look again next time
+				}
 				last = s
 				events, err := d.Events(ctx, prev, s)
 				if err != nil {
@@ -214,7 +224,9 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 						triggered = append(triggered, e.Trigger())
 					}
 				}
-				final := s.MR.State != "opened" && s.MR.State == prev.State
+				// Merged or closed, whoever did it and whatever --on says:
+				// nothing more will happen, so do not wait forever.
+				final := s.MR.State == "merged" || s.MR.State == "closed"
 				if len(triggered) == 0 && !final {
 					return false, nil
 				}
@@ -277,9 +289,10 @@ what a reply or a resolve needs.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			f := mr.ThreadFilter{Unresolved: unresolved, Mine: mine, IncludeSystem: includeSystem, MaxBodyChars: maxBody}
+			var prev mr.Cursor
 			if cursor != "" {
-				prev, err := mr.DecodeCursor(cursor)
-				if err != nil {
+				var err error
+				if prev, err = mr.DecodeCursor(cursor); err != nil {
 					return usageError{err}
 				}
 				f.AfterNote = prev.MaxNote
@@ -291,6 +304,9 @@ what a reply or a resolve needs.`,
 			s, err := mr.Fetch(ctx, m.client, m.ref)
 			if err != nil {
 				return err
+			}
+			if err := prev.Check(s); err != nil {
+				return usageError{err}
 			}
 			warnTruncated(rt, s)
 			return rt.Print(struct {
