@@ -208,7 +208,7 @@ prints; on timeout, items is [], timed_out is true, and checked_at is the
 			}
 			f.cache = inbox.NewCache(rt.Now)
 			var res *inboxResult
-			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
+			check := func() (bool, error) {
 				rt.ResetWarnings()
 				r, items, err := collectInbox(ctx, rt, f)
 				if err != nil {
@@ -217,6 +217,18 @@ prints; on timeout, items is [], timed_out is true, and checked_at is the
 				res = r
 				res.Items = filterItems(items, since, false)
 				return len(res.Items) > 0, nil
+			}
+			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
+				if done, err := check(); !done || err != nil || !f.cache.Kept() {
+					return done, err
+				}
+				// The checked_at printed with what is new is the --since of
+				// the next wait: what happened before it on a merge request
+				// that was not read again (see inbox.Cache) would be lost
+				// for good. So everything is read before anything is
+				// printed, and the wait goes on if nothing is new after all.
+				f.cache.Expire()
+				return check()
 			})
 			if err != nil {
 				return err

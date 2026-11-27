@@ -33,7 +33,10 @@ import (
 //     the approvers of a merge request I review, its approvals are read at
 //     each poll (one request).
 //   - Whatever was missed: everything is read again after maxAge, so that
-//     a wrong assumption costs a delay, never a miss.
+//     a wrong assumption costs a delay, never a miss. For that to hold
+//     from one inbox wait to the next, whose --since is the checked_at of
+//     the previous one, what is printed must come from a Collect that
+//     kept nothing: see Kept and Expire.
 //
 // What is kept for merge requests I review can thus show, for up to
 // maxAge, an older pipeline status, merge status or count of unresolved
@@ -46,6 +49,9 @@ type Cache struct {
 
 	mu      sync.Mutex
 	entries map[cacheKey]*cacheEntry
+	// kept counts the merge requests that the last Collect did not read
+	// in full.
+	kept int
 }
 
 const (
@@ -95,7 +101,30 @@ func (ca *Cache) start() time.Time {
 	if ca == nil {
 		return time.Time{}
 	}
+	ca.mu.Lock()
+	ca.kept = 0
+	ca.mu.Unlock()
 	return ca.now()
+}
+
+// Kept reports whether the last Collect left a merge request unread, or
+// partly: its result may then lack what GitLab did without changing
+// updated_at.
+func (ca *Cache) Kept() bool {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	return ca.kept > 0
+}
+
+// Expire makes the next Collect read every merge request in full. What
+// is known of their updated_at stays: what that Collect reads can be kept
+// afterwards.
+func (ca *Cache) Expire() {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	for _, e := range ca.entries {
+		e.snap = nil
+	}
 }
 
 // snapshot returns what Fetch would, reading only what may have changed
@@ -130,6 +159,9 @@ func (ca *Cache) snapshot(ctx context.Context, c *gitlab.Client, host string, m 
 			return nil, err
 		}
 		if s != nil {
+			ca.mu.Lock()
+			ca.kept++
+			ca.mu.Unlock()
 			return s, nil
 		}
 	}

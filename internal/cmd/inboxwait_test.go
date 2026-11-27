@@ -186,20 +186,21 @@ func TestInboxWaitPrintsWhatIsNew(t *testing.T) {
 }
 
 // Something new at the fourth poll, on a merge request that the third
-// poll did not read: its updated_at changed, it is read again and
-// printed.
+// poll did not read: its updated_at changed, it is read again, and then
+// everything is, before it is printed (see TestInboxWaitTwiceMissesNothing).
 func TestInboxWaitReadsAgainWhatChanged(t *testing.T) {
 	g := &waitGitLab{mrs: 2, replyAt: 4}
 	out, _ := inboxWait(t, g)
 	if out.TimedOut || len(out.Items) != 1 || out.Items[0].Ref != "group/project!1" || !slices.Contains(out.Items[0].Reasons, "new_replies") {
 		t.Errorf("want !1 with new_replies, got %+v", out)
 	}
-	if polls := g.count("list"); polls != 4 {
-		t.Errorf("%d polls, want 4", polls)
+	if lists := g.count("list"); lists != 5 {
+		t.Errorf("the list asked %d times, want 5: four polls, and the full read before printing", lists)
 	}
-	// !1: polls 1, 2 and 4. !2, unchanged: polls 1 and 2.
-	if one, two := g.count("1/discussions"), g.count("2/discussions"); one != 3 || two != 2 {
-		t.Errorf("discussions of !1 asked %d times and of !2 %d times, want 3 and 2", one, two)
+	// !1: polls 1, 2 and 4, and the full read. !2, unchanged: polls 1
+	// and 2, and the full read.
+	if one, two := g.count("1/discussions"), g.count("2/discussions"); one != 4 || two != 3 {
+		t.Errorf("discussions of !1 asked %d times and of !2 %d times, want 4 and 3", one, two)
 	}
 }
 
