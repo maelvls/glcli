@@ -1,0 +1,4 @@
+exit 0
+--- stdout
+{"me":"me","host":"gitlab.com","checked_at":"2026-11-27T12:00:00Z","timed_out":true,"items":[],"hints":["Nothing new within 14m0s: to wait again, pass --since 2026-11-27T12:00:00Z."]}
+--- stderr

@@ -1,0 +1,4 @@
+exit 0
+--- stdout
+{"me":"me","host":"gitlab.com","items":[{"kind":"review","reasons":["review_requested","new_replies"],"ref":"group/project!1","title":"Fix it","url":"https://gitlab.com/group/project/-/merge_requests/1","author":"bob","at":"2026-11-27T12:06:00Z"}],"checked_at":"2026-11-27T12:08:00Z"}
+--- stderr

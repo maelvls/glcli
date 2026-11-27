@@ -1,0 +1,4 @@
+exit 0
+--- stdout
+{"mr":{"ref":"g/p!1","url":"https://gitlab.example/g/p/-/merge_requests/1","title":"Add a thing","state":"opened","author":"alice","source_branch":"thing","target_branch":"main","head_sha":"head1","pushed_at":"2026-11-26T10:00:00Z","threads":{"resolvable":0,"unresolved":0},"last_comment_by_me_at":"2026-11-26T10:01:00Z","updated_at":"2026-11-26T10:01:00Z","cursor":"eyJtIjoiMSExIiwicyI6ImhlYWQxIiwidiI6MSwiYiI6ImJhc2UxIiwicGkiOiJkNTA0NDEyZDViNmU2NzM5NjQ3ZTc1MmFmZjhlNDY4ZGRlMDkzZjJmIiwic3QiOiJvcGVuZWQiLCJuIjoxMH0"},"timed_out":true,"events":[],"hints":["Nothing to wait for happened within 1m0s: to wait again without missing anything, pass --cursor eyJtIjoiMSExIiwicyI6ImhlYWQxIiwidiI6MSwiYiI6ImJhc2UxIiwicGkiOiJkNTA0NDEyZDViNmU2NzM5NjQ3ZTc1MmFmZjhlNDY4ZGRlMDkzZjJmIiwic3QiOiJvcGVuZWQiLCJuIjoxMH0."]}
+--- stderr
