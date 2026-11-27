@@ -406,9 +406,28 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 	}
 	newest := s.Versions[0]
 	// Versions are newest first: the first one not after what I last saw
-	// is the one I saw.
+	// is the one whose patch I know.
 	seen := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(a.seenAt) })
-	same := seen >= 0 && s.Versions[seen].PatchIDSHA == newest.PatchIDSHA
+	// same: the newest patch is one I know. I know the one I saw, and the
+	// one of a push of mine made while the patch was one I knew: after a
+	// rebase by someone else that kept it, or after a change undone since.
+	// (Not for analyse to say: without trusted patch IDs, that rebase
+	// counts.) Only for the patch: the dates and the doubts stay what they
+	// were before my push.
+	same, known := seen >= 0, ""
+	if same {
+		known = s.Versions[seen].PatchIDSHA
+	}
+	for i := seen - 1; i >= 0; i-- {
+		switch v := s.Versions[i]; {
+		case v.PatchIDSHA != "" && v.PatchIDSHA == known:
+			same = true
+		case a.mine[i] && same:
+			known = v.PatchIDSHA
+		default:
+			same = false
+		}
+	}
 	// The changes arrived with the oldest of the pushes since what I last
 	// saw that all have the newest patch ID. The rebases that followed
 	// must not move the date, or inbox wait would fire for each of them.
@@ -416,7 +435,10 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 	for i := 1; i < len(s.Versions) && s.Versions[i].PatchIDSHA == newest.PatchIDSHA && s.Versions[i].CreatedAt.After(a.seenAt); i++ {
 		first = i
 	}
-	if (!same && first == 0) || !trusted() {
+	// Not the same, and no older push with the newest patch: the changes
+	// came with the newest push, patch IDs trusted or not, unless it is
+	// mine.
+	if (!same && first == 0 && !a.mine[0]) || !trusted() {
 		return a.pushedAt, true
 	}
 	// Not from a push of mine either: the changes of someone else that I
@@ -442,7 +464,7 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 	// The changes are the ones I saw: only a doubt keeps the push. With
 	// both doubts, the later date: the push that took my approval away,
 	// or the retarget.
-	retargeted, approvalGone := doubts(s, me, a.seenAt)
+	retargeted, approvalGone := doubts(s, me, a.seenAt, a.mine)
 	if retargeted.IsZero() && !approvalGone {
 		return time.Time{}, false
 	}
@@ -452,8 +474,8 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 // doubts reads in the system notes what an unchanged patch ID does not
 // say: when the merge request was last retargeted since what I last saw
 // (the same changes now go to another branch), and whether GitLab took my
-// approval away.
-func doubts(s *mr.Snapshot, me string, seenAt time.Time) (retargeted time.Time, approvalGone bool) {
+// approval away. mine says which diff versions I pushed.
+func doubts(s *mr.Snapshot, me string, seenAt time.Time, mine []bool) (retargeted time.Time, approvalGone bool) {
 	// aware is the last time, not after what I last saw, that my review
 	// was requested or the merge request retargeted: both can remove my
 	// approval without a note of its own.
@@ -490,12 +512,13 @@ func doubts(s *mr.Snapshot, me string, seenAt time.Time) (retargeted time.Time, 
 	// I approved and did not take it back, yet I am not among the
 	// approvers: GitLab removed my approval. Whatever I knew of it, the
 	// changes were others for a while since what I last saw (changed, then
-	// back): that may be what removed it, and I did not act since.
+	// back, by someone else): that may be what removed it, and I did not
+	// act since.
 	saw := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(seenAt) })
-	if saw >= 0 && slices.ContainsFunc(s.Versions, func(v gitlab.Version) bool {
-		return v.CreatedAt.After(seenAt) && v.PatchIDSHA != "" && v.PatchIDSHA != s.Versions[saw].PatchIDSHA
-	}) {
-		return retargeted, true
+	for i := 0; i < saw; i++ {
+		if v := s.Versions[i]; !mine[i] && v.PatchIDSHA != "" && v.PatchIDSHA != s.Versions[saw].PatchIDSHA {
+			return retargeted, true
+		}
 	}
 	// Else I know that it is gone if, between my approval and what I last
 	// saw, my review was requested again, the merge request was
