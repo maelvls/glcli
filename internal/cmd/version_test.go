@@ -13,8 +13,8 @@ import (
 	"github.com/maelvls/glcli/internal/output"
 )
 
-// A test binary has no VCS settings and no module version: only the Go
-// version is sure to be there.
+// A test binary has no VCS settings, and "(devel)" for a module version:
+// only the Go version is sure to be there.
 func TestVersionPrintsOneLineOfJSON(t *testing.T) {
 	var outputs []string
 	for _, args := range [][]string{{"version"}, {"--version"}} {
@@ -48,6 +48,8 @@ func TestVersionUsageErrorsExit2(t *testing.T) {
 		{"version", "extra"},
 		{"version", "--no-such-flag"},
 		{"mr", "--version"},
+		// The --version flag cobra adds by itself also takes -v.
+		{"-v"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := Run(args, &stdout, &stderr); code != 2 {
@@ -111,13 +113,14 @@ func TestVersionOf(t *testing.T) {
 			want: `{"version":"v0.3.2-0.20261127155211-558d978d4c1e+dirty","commit":"558d978d4c1e0d2c7a8b9f3e5d6c7b8a9f0e1d2c","commit_time":"2026-11-27T15:52:11Z","modified":true,"go":"go1.27.1"}`,
 		},
 		{
-			// Go's own word for "no version" is printed as it is.
+			// go run, go test, -buildvcs=false: Go's own word for "no
+			// version" is printed as it is.
 			name: "no VCS information",
 			info: &debug.BuildInfo{GoVersion: "go1.27.1", Main: debug.Module{Version: "(devel)"}},
 			want: `{"version":"(devel)","go":"go1.27.1"}`,
 		},
 		{
-			name: "test binary",
+			name: "no module version",
 			info: &debug.BuildInfo{GoVersion: "go1.27.1"},
 			want: `{"go":"go1.27.1"}`,
 		},

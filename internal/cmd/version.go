@@ -21,9 +21,9 @@ type buildVersion struct {
 
 // versionOf takes everything from what the go command records in every
 // binary, so that no -ldflags are needed: the module version as Go gives
-// it (v0.3.1 after `go install ...@v0.3.1`; a pseudo-version or "(devel)"
-// for a local build), and the commit when the build was made from a
-// checkout. info is nil when the binary has no build information.
+// it (a tag, a pseudo-version when the commit is not a tag, or "(devel)"),
+// and the commit when the build was made from a checkout. info is nil
+// when the binary has no build information.
 func versionOf(info *debug.BuildInfo) buildVersion {
 	if info == nil {
 		return buildVersion{}
@@ -54,15 +54,21 @@ func readVersion() buildVersion {
 func addVersion(root *cobra.Command, rt *cli.Runtime) {
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
-		Short: "Print the version of glcli and the commit it was built from",
+		Short: "Print the version of glcli (and its commit, for a build from a checkout)",
 		Long: `Prints {version, commit, commit_time, modified, go}, as the go command
 recorded them in the binary; what it did not record is absent.
 
-version is the module version: v0.3.1 after "go install ...@v0.3.1", a
-pseudo-version (v0.0.0-<commit time>-<commit>) when the commit has no
-tag, with +dirty when the checkout had uncommitted changes, or "(devel)".
-commit, commit_time and modified (only when true) are there for a build
-made from a git checkout, such as "make install".`,
+version is the module version as Go gives it: v0.3.1 for the tag v0.3.1;
+a pseudo-version ending in -<commit time>-<first 12 characters of the
+commit> when the commit is not a tag (v0.0.0-... before the first tag,
+the next patch version after one: v0.3.2-0.<commit time>-<commit> is a
+commit after v0.3.1, not a v0.3.2); "(devel)" when Go recorded none. It
+ends in +dirty when the checkout had changes or untracked files.
+
+commit, commit_time and modified (only when true: the checkout had
+changes or untracked files) are there only for a build made from a git
+checkout, such as "make install". "go install ...@version" records no
+commit: there, a pseudo-version is what names it.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			return rt.Print(readVersion())

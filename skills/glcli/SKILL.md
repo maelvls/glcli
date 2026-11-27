@@ -7,7 +7,7 @@ description: "GitLab CLI for agents: what waits on the user across all projects 
 
 Use `glcli` from `$PATH`. If it is missing, tell the user: `go install github.com/maelvls/glcli/cmd/glcli@latest`, then `glcli skills install`. This skill is embedded in the binary: after an upgrade, `glcli skills install --overwrite` updates it.
 
-`glcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. If a capability named here is absent from the installed help, report version skew, with the output of `glcli version`, instead of guessing.
+`glcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. If a capability named here is absent from the installed help, report version skew, with the output of `glcli version` (a glcli that does not know `version` is older than this skill), instead of guessing.
 
 glcli reads glab's hosts and tokens (`~/.config/glab-cli/config.yml`): if a token is missing or rejected, tell the user to run `glab auth login --hostname <host>`. `glcli auth status` lists the hosts without calling GitLab.
 
