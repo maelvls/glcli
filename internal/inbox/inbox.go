@@ -43,8 +43,9 @@ type Item struct {
 	TodoIDs      []int     `json:"todo_ids,omitempty"`
 	// Body is the text of the to-do item (the comment that mentioned me).
 	Body string `json:"body,omitempty"`
-	// myLast is my last comment, approval or push on the merge request:
-	// a to-do item older than that is stale.
+	// myLast is my last comment, review (approval, unapproval, requested
+	// changes) or push on the merge request: a to-do item older than that
+	// is stale.
 	myLast time.Time
 }
 
@@ -219,7 +220,7 @@ func stripFragment(u string) string {
 
 // activity is what I and others did on a merge request, from its notes.
 type activity struct {
-	myLast      time.Time // my last comment, approval or push
+	myLast      time.Time // my last comment, review note (isReviewNote) or push
 	reviewReqAt time.Time // last "requested review from @me"
 	repliesAt   time.Time // last human reply in my threads, or mention
 	commentsAt  time.Time // last human comment by someone else
@@ -235,7 +236,7 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 	}
 	for _, d := range s.Discussions {
 		for _, n := range d.Notes {
-			if n.Author.Username == me && (!n.System || strings.HasPrefix(n.Body, "approved this merge request") || mr.IsPushNote(n)) {
+			if n.Author.Username == me && (!n.System || isReviewNote(n) || mr.IsPushNote(n)) {
 				a.myLast = later(a.myLast, n.CreatedAt)
 			}
 			if n.System && strings.HasPrefix(n.Body, "approved this merge request") {
@@ -264,6 +265,24 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 		}
 	}
 	return a
+}
+
+// isReviewNote reports whether n is one of the system notes GitLab writes
+// under the name of who reviews, comment or not: "approved this merge
+// request", "unapproved this merge request", "requested changes" (a
+// review submitted with "Request changes") and "left review comments" (a
+// review submitted with "Comment"). Their author acted on the merge
+// request (SystemNotes::MergeRequestsService).
+func isReviewNote(n gitlab.Note) bool {
+	if !n.System {
+		return false
+	}
+	for _, start := range []string{"approved this merge request", "unapproved this merge request", "requested changes", "left review comments"} {
+		if strings.HasPrefix(n.Body, start) {
+			return true
+		}
+	}
+	return false
 }
 
 // reviewItem is reviewItemWith on a GitLab whose patch IDs are not
