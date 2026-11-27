@@ -73,9 +73,16 @@ func Fetch(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, error) {
 	return s, nil
 }
 
-// mergeParents caches the parents of merged-results commits, which never
-// change.
+// mergeParents caches the merged-results commits (a mergeCommit for each),
+// which never change.
 var mergeParents sync.Map
+
+type mergeCommit struct {
+	parents []string
+	// missing is true when GitLab answered 404: it does not keep these
+	// commits forever.
+	missing bool
+}
 
 // PipelineIsHead reports whether the head pipeline of m ran on its head
 // commit (see PipelineOnCommit).
@@ -105,7 +112,9 @@ const (
 // on a merged-results or merge-train commit of it. The SHA of such a
 // pipeline (ref refs/merge-requests/<iid>/merge or /train) is a temporary
 // merge commit, which has the commit among its parents: reading them
-// costs one request per pipeline, once.
+// costs one request per pipeline, once. Only the merge commit of the head
+// pipeline is asked for again when it cannot be read: it is recent, and
+// may become readable.
 func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest, p gitlab.PipelineRef, sha string) (OnCommit, error) {
 	if sha == "" {
 		return OnCommitNo, nil
@@ -118,22 +127,28 @@ func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeReque
 		return OnCommitNo, nil
 	}
 	key := c.Host.Name + "/" + strconv.Itoa(m.ProjectID) + "/" + p.SHA
-	parents, ok := mergeParents.Load(key)
-	if !ok {
-		var commit struct {
+	cached, ok := mergeParents.Load(key)
+	commit, _ := cached.(mergeCommit)
+	isHead := m.HeadPipeline != nil && m.HeadPipeline.ID == p.ID
+	if !ok || (commit.missing && isHead) {
+		var answer struct {
 			ParentIDs []string `json:"parent_ids"`
 		}
-		err := c.Get(ctx, "projects/"+strconv.Itoa(m.ProjectID)+"/repository/commits/"+p.SHA, nil, &commit)
-		if gitlab.IsStatus(err, 404) {
-			return OnCommitUnknown, nil
-		}
-		if err != nil {
+		err := c.Get(ctx, "projects/"+strconv.Itoa(m.ProjectID)+"/repository/commits/"+p.SHA, nil, &answer)
+		switch {
+		case gitlab.IsStatus(err, 404):
+			commit = mergeCommit{missing: true}
+		case err != nil:
 			return OnCommitNo, err
+		default:
+			commit = mergeCommit{parents: answer.ParentIDs}
 		}
-		parents = commit.ParentIDs
-		mergeParents.Store(key, parents)
+		mergeParents.Store(key, commit)
 	}
-	if slices.ContainsFunc(parents.([]string), func(parent string) bool { return strings.HasPrefix(parent, sha) }) {
+	if commit.missing {
+		return OnCommitUnknown, nil
+	}
+	if slices.ContainsFunc(commit.parents, func(parent string) bool { return strings.HasPrefix(parent, sha) }) {
 		return OnCommitYes, nil
 	}
 	return OnCommitNo, nil

@@ -288,19 +288,23 @@ type Found struct {
 // abbreviated; the head commit when empty): the head pipeline when it ran
 // on that commit, else the newest of the last 20 pipelines of the merge
 // request that did. A merged-results or merge-train pipeline runs on a
-// temporary merge commit of the commit (see mr.PipelineOnCommit).
+// temporary merge commit of the commit (see mr.PipelineOnCommit): that is
+// looked into for the head pipeline, and for the others only when sha is
+// given, since it costs a request for each of them.
 func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, error) {
 	var m gitlab.MergeRequest
 	if err := c.Get(ctx, mr.Base(r), nil, &m); err != nil {
 		return Found{}, err
 	}
-	head := sha == "" || strings.HasPrefix(m.SHA, sha)
+	given := sha != ""
+	head := !given || strings.HasPrefix(m.SHA, sha)
 	if head {
 		sha = m.SHA
 	}
 	found := Found{SHA: sha}
 	unconfirmed := 0
-	if hp := m.HeadPipeline; hp != nil {
+	hp := m.HeadPipeline
+	if hp != nil {
 		on, err := mr.PipelineOnCommit(ctx, c, m, *hp, sha)
 		if err != nil {
 			return found, err
@@ -320,7 +324,16 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 	for _, p := range list {
 		// GitLab lists the newest first: the pipelines older than one
 		// that matches are not looked at, which spares their commits.
-		if p.ID <= found.ID {
+		if p.ID <= found.ID || (hp != nil && p.ID == hp.ID) {
+			continue
+		}
+		if !given {
+			// Waiting for the pipeline of a new head: the pipelines
+			// listed are those of older commits, not worth a request
+			// each.
+			if strings.HasPrefix(p.SHA, sha) {
+				found.ID = p.ID
+			}
 			continue
 		}
 		on, err := mr.PipelineOnCommit(ctx, c, m, p, sha)

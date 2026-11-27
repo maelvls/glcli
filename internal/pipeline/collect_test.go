@@ -378,3 +378,86 @@ func TestForMRHeadPipelineOnAnUnreadableMergeCommit(t *testing.T) {
 		t.Errorf("ForMR(unknown) = %+v, %v; want %+v", got, err, want)
 	}
 }
+
+// twentyMergedResults is a merge request that has just been pushed to:
+// headSHA has no pipeline yet, the head pipeline is still the one of the
+// previous commit, and the 20 pipelines listed (120 to 101) all ran on
+// merge commits of oldSHA, readable or not.
+func twentyMergedResults(readable bool) *fake {
+	const mrPath = "projects/group/project/merge_requests/1"
+	f := &fake{routes: map[string]func(url.Values) (int, string){}}
+	var list []string
+	for id := 120; id > 100; id-- {
+		sha := fmt.Sprintf("m%d", id)
+		list = append(list, fmt.Sprintf(`{"id":%d,"sha":%q,"ref":"refs/merge-requests/1/merge","status":"success"}`, id, sha))
+		if readable {
+			f.routes["projects/5/repository/commits/"+sha] = ok(`{"parent_ids":["` + targetSHA + `","` + oldSHA + `"]}`)
+		}
+	}
+	f.routes[mrPath] = ok(`{"iid":1,"project_id":5,"sha":"` + headSHA + `","head_pipeline":` + list[0] + `}`)
+	f.routes[mrPath+"/pipelines"] = ok("[" + strings.Join(list, ",") + "]")
+	return f
+}
+
+// commits counts the requests for commits.
+func (f *fake) commits() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for path, q := range f.queries {
+		if strings.HasPrefix(path, "projects/5/repository/commits/") {
+			n += len(q)
+		}
+	}
+	return n
+}
+
+// What four polls cost in requests for commits, with 20 merged-results
+// pipelines listed and none for the commit.
+func TestForMRCommitRequests(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		sha      string
+		readable bool
+		want     int
+		wantWhy  string
+	}{
+		{"head, readable", "", true, 1, "the head pipeline's, once"},
+		{"head, unreadable", "", false, 4, "the head pipeline's, at each poll"},
+		{"--sha, readable", "dddd3333", true, 20, "each of the 20, once"},
+		{"--sha, unreadable", "dddd3333", false, 23, "each of the 20 once, and the head pipeline's at each poll"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := twentyMergedResults(tt.readable)
+			c := f.client(t)
+			for range 4 {
+				got, err := ForMR(context.Background(), c, testMR, tt.sha)
+				if err != nil || got.ID != 0 {
+					t.Fatalf("ForMR = %+v, %v; want no pipeline", got, err)
+				}
+			}
+			if n := f.commits(); n != tt.want {
+				t.Errorf("%d requests for commits, want %d: %s", n, tt.want, tt.wantWhy)
+			}
+			if n := f.total() - f.commits(); n != 8 {
+				t.Errorf("%d other requests, want 8: the merge request and its pipelines, 4 times", n)
+			}
+		})
+	}
+}
+
+// Without --sha, a listed pipeline still matches by its own SHA: the head
+// pipeline of the merge request may not be set yet.
+func TestForMRHeadPipelineNotSetYet(t *testing.T) {
+	const mrPath = "projects/group/project/merge_requests/1"
+	f := &fake{routes: map[string]func(url.Values) (int, string){
+		mrPath: ok(`{"iid":1,"project_id":5,"sha":"` + headSHA + `"}`),
+		mrPath + "/pipelines": ok(`[
+			{"id":95,"sha":"` + headSHA + `","ref":"refs/merge-requests/1/head","status":"running"},
+			{"id":90,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"failed"}]`),
+	}}
+	got, err := ForMR(context.Background(), f.client(t), testMR, "")
+	if want := (Found{ID: 95, SHA: headSHA}); err != nil || got != want {
+		t.Errorf("ForMR = %+v, %v; want %+v", got, err, want)
+	}
+}
