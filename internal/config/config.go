@@ -65,33 +65,60 @@ func Load() (*Config, error) {
 	return Parse(data, p)
 }
 
+// The scalars are kept as nodes, which are not checked against their tag:
+// glab can write "token: !!null glpat-…", and decoding that into a string
+// fails with an error that quotes the token.
 type rawConfig struct {
-	Host  string `yaml:"host"`
+	Host  yaml.Node `yaml:"host"`
 	Hosts map[string]struct {
-		APIHost     string `yaml:"api_host"`
-		APIProtocol string `yaml:"api_protocol"`
-		Token       string `yaml:"token"`
-		User        string `yaml:"user"`
+		APIHost     yaml.Node `yaml:"api_host"`
+		APIProtocol yaml.Node `yaml:"api_protocol"`
+		Token       yaml.Node `yaml:"token"`
+		User        yaml.Node `yaml:"user"`
 	} `yaml:"hosts"`
 }
 
-// Parse parses the content of glab's config.yml.
+// Parse parses the content of glab's config.yml. Its errors name the file,
+// a line and what is wrong there, and never repeat a value or a key of the
+// file, which holds tokens. (The names of the hosts and of their users are
+// not secrets: Config.Host and `glcli auth status` do show them.)
 func Parse(data []byte, path string) (*Config, error) {
-	var raw rawConfig
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+	fail := func(msg string) (*Config, error) {
+		return nil, fmt.Errorf("reading %s: %s", path, msg)
 	}
-	c := &Config{Path: path, DefaultHost: raw.Host, Hosts: map[string]Host{}}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fail(redact(err))
+	}
+	var raw rawConfig
+	if err := doc.Decode(&raw); err != nil {
+		if msg := diagnose(&doc); msg != "" {
+			return fail(msg)
+		}
+		return fail(redact(err))
+	}
+	// The field reported is the first bad one of the file: the hosts are
+	// visited in no fixed order.
+	var bad *yaml.Node
+	var badField string
+	str := func(field string, n yaml.Node) string {
+		s, ok := text(&n)
+		if !ok && (bad == nil || before(&n, bad)) {
+			bad, badField = &n, field
+		}
+		return s
+	}
+	c := &Config{Path: path, DefaultHost: str("host", raw.Host), Hosts: map[string]Host{}}
 	if c.DefaultHost == "" {
 		c.DefaultHost = "gitlab.com"
 	}
 	for name, h := range raw.Hosts {
 		host := Host{
 			Name:        name,
-			APIHost:     h.APIHost,
-			Protocol:    h.APIProtocol,
-			Token:       h.Token,
-			User:        h.User,
+			APIHost:     str("api_host", h.APIHost),
+			Protocol:    str("api_protocol", h.APIProtocol),
+			Token:       str("token", h.Token),
+			User:        str("user", h.User),
 			TokenSource: path,
 		}
 		if host.APIHost == "" {
@@ -102,7 +129,51 @@ func Parse(data []byte, path string) (*Config, error) {
 		}
 		c.Hosts[name] = host
 	}
+	if bad != nil {
+		return fail(fmt.Sprintf("line %d: %s is not a string", bad.Line, badField))
+	}
 	return c, nil
+}
+
+// text returns the text of a scalar whatever its tag says, so that
+// "!!null glpat-…" reads like "glpat-…". A missing key and a real null
+// ("token:", "token: ~", "token: !!null") are the empty string. ok is false
+// for a list or a mapping.
+func text(n *yaml.Node) (s string, ok bool) {
+	n = target(n)
+	if n.IsZero() || isNull(n) {
+		return "", true
+	}
+	if n.Kind != yaml.ScalarNode {
+		return "", false
+	}
+	return n.Value, true
+}
+
+// target follows an alias ("token: *t") to the node it stands for.
+func target(n *yaml.Node) *yaml.Node {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		return n.Alias
+	}
+	return n
+}
+
+// isNull is true for a real null, and false for a text that only carries
+// the !!null tag.
+func isNull(n *yaml.Node) bool {
+	if n.Kind != yaml.ScalarNode || n.Tag != "!!null" {
+		return false
+	}
+	switch n.Value {
+	case "", "~", "null", "Null", "NULL":
+		return true
+	}
+	return false
+}
+
+// before says whether a comes first in the file.
+func before(a, b *yaml.Node) bool {
+	return a.Line < b.Line || a.Line == b.Line && a.Column < b.Column
 }
 
 // Default returns the name of the host to use when nothing else says:
