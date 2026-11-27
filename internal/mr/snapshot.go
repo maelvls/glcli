@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/maelvls/glcli/internal/gitlab"
@@ -72,39 +73,90 @@ func Fetch(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, error) {
 	return s, nil
 }
 
-// mergeParents caches the parents of merged-results commits, which never
-// change.
+// mergeParents caches the merged-results commits (a mergeCommit for each),
+// which never change.
 var mergeParents sync.Map
 
+type mergeCommit struct {
+	parents []string
+	// missing is true when GitLab answered 404: it does not keep these
+	// commits forever.
+	missing bool
+}
+
+// PipelineIsHead reports whether the head pipeline of m ran on its head
+// commit (see PipelineOnCommit).
 func PipelineIsHead(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest) (bool, error) {
-	hp := m.HeadPipeline
-	if hp == nil {
+	if m.HeadPipeline == nil {
 		return false, nil
 	}
-	if hp.SHA == m.SHA {
-		return true, nil
+	on, err := PipelineOnCommit(ctx, c, m, *m.HeadPipeline, m.SHA)
+	return on == OnCommitYes, err
+}
+
+// OnCommit is the answer of PipelineOnCommit.
+type OnCommit int
+
+const (
+	// OnCommitNo: the pipeline ran on another commit.
+	OnCommitNo OnCommit = iota
+	// OnCommitYes: it ran on the commit, or on a merge commit of it.
+	OnCommitYes
+	// OnCommitUnknown: it ran on a merged-results or merge-train commit
+	// that cannot be read (HTTP 404), so its parents are not known.
+	OnCommitUnknown
+)
+
+// PipelineOnCommit reports whether the pipeline p of the merge request m
+// ran on the commit sha (full or abbreviated): on that commit itself, or
+// on a merged-results or merge-train commit of it. The SHA of such a
+// pipeline (ref refs/merge-requests/<iid>/merge or /train) is a temporary
+// merge commit, which has the commit among its parents: reading them
+// costs one request per pipeline, once. Only the merge commit of the head
+// pipeline is asked for again when it cannot be read: it is recent, and
+// may become readable.
+//
+// The merge commit is read from the project of the merge request, also
+// when the merge request comes from a fork and its other pipelines run in
+// the fork: GitLab creates merged-results and merge-train pipelines in
+// the target project, the only one to have these refs.
+func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest, p gitlab.PipelineRef, sha string) (OnCommit, error) {
+	if sha == "" {
+		return OnCommitNo, nil
+	}
+	if strings.HasPrefix(p.SHA, sha) {
+		return OnCommitYes, nil
 	}
 	prefix := "refs/merge-requests/" + strconv.Itoa(m.IID) + "/"
-	if hp.Ref != prefix+"merge" && hp.Ref != prefix+"train" {
-		return false, nil
+	if p.Ref != prefix+"merge" && p.Ref != prefix+"train" {
+		return OnCommitNo, nil
 	}
-	key := c.Host.Name + "/" + strconv.Itoa(m.ProjectID) + "/" + hp.SHA
-	parents, ok := mergeParents.Load(key)
-	if !ok {
-		var commit struct {
+	key := c.Host.Name + "/" + strconv.Itoa(m.ProjectID) + "/" + p.SHA
+	cached, ok := mergeParents.Load(key)
+	commit, _ := cached.(mergeCommit)
+	isHead := m.HeadPipeline != nil && m.HeadPipeline.ID == p.ID
+	if !ok || (commit.missing && isHead) {
+		var answer struct {
 			ParentIDs []string `json:"parent_ids"`
 		}
-		err := c.Get(ctx, "projects/"+strconv.Itoa(m.ProjectID)+"/repository/commits/"+hp.SHA, nil, &commit)
-		if gitlab.IsStatus(err, 404) {
-			return false, nil
+		err := c.Get(ctx, "projects/"+strconv.Itoa(m.ProjectID)+"/repository/commits/"+p.SHA, nil, &answer)
+		switch {
+		case gitlab.IsStatus(err, 404):
+			commit = mergeCommit{missing: true}
+		case err != nil:
+			return OnCommitNo, err
+		default:
+			commit = mergeCommit{parents: answer.ParentIDs}
 		}
-		if err != nil {
-			return false, err
-		}
-		parents = commit.ParentIDs
-		mergeParents.Store(key, parents)
+		mergeParents.Store(key, commit)
 	}
-	return slices.Contains(parents.([]string), m.SHA), nil
+	if commit.missing {
+		return OnCommitUnknown, nil
+	}
+	if slices.ContainsFunc(commit.parents, func(parent string) bool { return strings.HasPrefix(parent, sha) }) {
+		return OnCommitYes, nil
+	}
+	return OnCommitNo, nil
 }
 
 func fetchOnce(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, error) {
