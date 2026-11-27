@@ -67,6 +67,33 @@ func TestForMROlderPipelineInTheFork(t *testing.T) {
 	}
 }
 
+// GitLab lists the merge request pipelines before the branch pipelines,
+// so the newest pipeline of a commit is not always the first listed: the
+// project is the one of the pipeline kept, whatever the order.
+func TestForMRProjectOfTheNewestPipelineOfTheCommit(t *testing.T) {
+	const list = "projects/group/project/merge_requests/1/pipelines"
+	head := `{"id":95,"project_id":9,"sha":"` + headSHA + `","ref":"feature","status":"running"}`
+	// A member ran pipeline 90 in the parent project; the branch pipeline
+	// 93 of the fork came later.
+	f := fromFork()
+	f.routes[list] = ok(`[` + head + `,
+		{"id":90,"project_id":5,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"failed","source":"merge_request_event"},
+		{"id":93,"project_id":9,"sha":"` + oldSHA + `","ref":"feature","status":"success","source":"push"}]`)
+	got, err := ForMR(context.Background(), f.client(t), testMR, oldSHA)
+	if err != nil || got.ID != 93 || got.Fork == nil || got.Fork.ID != 93 || got.Fork.Project != "9" {
+		t.Errorf("ForMR = %+v (fork %+v), %v; want the pipeline 93, in project 9", got, got.Fork, err)
+	}
+	// The other way round: the newest is in the parent project.
+	f = fromFork()
+	f.routes[list] = ok(`[` + head + `,
+		{"id":90,"project_id":9,"sha":"` + oldSHA + `","ref":"feature","status":"failed"},
+		{"id":93,"project_id":5,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"success"}]`)
+	got, err = ForMR(context.Background(), f.client(t), testMR, oldSHA)
+	if want := (Found{ID: 93, SHA: oldSHA, Head: headSHA}); err != nil || got != want {
+		t.Errorf("ForMR = %+v, %v; want %+v", got, err, want)
+	}
+}
+
 // A merged-results pipeline of a merge request from a fork runs in the
 // parent project: GitLab keeps refs/merge-requests/<iid>/merge there, so
 // its merge commit is read from the project of the merge request.
