@@ -40,7 +40,7 @@ glcli v1 only reads. For writes (comments, replies, resolving threads, approving
 ## Non-obvious behaviour
 
 - Output is one line of JSON (indented only on a terminal); empty fields are left out, but top-level lists (`items`, `events`, `discussions`, `failed_jobs`) are always present.
-- Comments by bots (`project_123_bot_…`, service accounts `service_account_…`, `*-bot`) and system notes never count as human comments; `--ignore-author` adds usernames.
+- Comments by bots (`project_123_bot_…`, service accounts `service_account_…`, `*-bot`, GitLab's own such as `GitLab-Security-Bot`) and system notes do not count as human comments; `--ignore-author` leaves out more usernames, and `--include-author` brings a bot back (a reviewer that runs under a service account). GitLab Duo reviews count: `--ignore-author GitLabDuo` leaves them out.
 - Commands are cut after 30 s (exit 124; `GLCLI_COMMAND_TIMEOUT_MS`), except the wait commands. The wait commands keep trying while GitLab cannot be reached (closed lid, VPN down) and stop on any other error. Exit 130 when interrupted.
 - `--host` picks another instance (such as `code.pan.run`) for `inbox` and short references; a URL carries its host.
 - `GLCLI_DEBUG=1` traces each API call with its duration on stderr.

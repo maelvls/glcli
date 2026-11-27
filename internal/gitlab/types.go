@@ -2,7 +2,7 @@ package gitlab
 
 import (
 	"regexp"
-	"strings"
+	"slices"
 	"time"
 )
 
@@ -13,21 +13,32 @@ type User struct {
 	Name     string `json:"name"`
 }
 
-// botUsername ignores case, as GitLab does for usernames.
-var botUsername = regexp.MustCompile(`(?i)` + strings.Join([]string{
-	`^(project|group)_\d+_bot(_[0-9a-z]+)?$`, // project and group access tokens
-	`^service_account_`,                      // service accounts, as GitLab names them by default
-	`(^|[-_])bot$`,                           // renovate-bot
-	`\[bot\]$`,                               // dependabot[bot]
-	`^(ghost|gitlab-bot|gitlabduo|gitlab-duo|dependabot|renovate)$`,
-}, "|"))
+// botUsername is case-sensitive on purpose: ignoring case would make bots
+// of people called Le Bot (Yann.Le-Bot).
+var botUsername = regexp.MustCompile(`^(project|group)_\d+_bot(_[0-9a-z]+)?$|(^|[-_])bot$|^service_account_`)
+
+// internalBots are the users GitLab creates for itself, in lowercase:
+// GitLab-Security-Bot and GitLab-Admin-Bot have capitals.
+var internalBots = []string{"ghost", "gitlab-bot", "gitlab-security-bot", "gitlab-admin-bot", "alert-bot", "support-bot", "automation-bot"}
 
 // IsBot reports whether username looks like a machine: project and group
 // access tokens (project_123_bot_abc), service accounts
-// (service_account_…), "*-bot" and "name[bot]" accounts, the ghost user,
-// and a few bots known by name (GitLab Duo, Dependabot, Renovate).
+// (service_account_…), "*-bot" accounts, and GitLab's own users (ghost,
+// GitLab-Security-Bot…). GitLab Duo (GitLabDuo) is not one: its review is
+// a comment that the author of a merge request waits for.
 func IsBot(username string) bool {
-	return botUsername.MatchString(username)
+	return botUsername.MatchString(username) || slices.Contains(internalBots, lowerASCII(username))
+}
+
+// lowerASCII lowercases ASCII letters only: GitLab usernames are ASCII.
+func lowerASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // PipelineRef is the pipeline summary embedded in merge requests.
