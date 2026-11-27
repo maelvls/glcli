@@ -27,8 +27,11 @@ type followGate struct {
 	// fail says, for the nth matching request (from 1), the status to
 	// answer instead of the fake (0: let it through).
 	fail func(n int) int
-	n    int
-	next http.Handler
+	// before, when set, is called with the nth matching request before
+	// anything else (outside the lock).
+	before func(n int, r *http.Request)
+	n      int
+	next   http.Handler
 }
 
 func (g *followGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +43,11 @@ func (g *followGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status = g.fail(g.n)
 		}
 	}
+	n := g.n
 	g.mu.Unlock()
+	if g.before != nil && g.match != nil && g.match(r) {
+		g.before(n, r)
+	}
 	if status != 0 {
 		http.Error(w, `{"message":"followGate"}`, status)
 		return

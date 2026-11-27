@@ -137,6 +137,7 @@ func newMRWait(rt *cli.Runtime) *cobra.Command {
 		cursor      string
 		on          []string
 		includeMine bool
+		follow      bool
 		maxBody     int
 		ignore      []string
 		include     []string
@@ -189,14 +190,43 @@ merge request is refused.
 Prints {events, mr, triggered_by}. mr.cursor is the cursor to wait again.
 When --timeout runs out: events [], timed_out true, and mr.cursor is the
 --cursor it started from. Exit codes: 0 (also on timeout), 1 on error,
-130 when interrupted.`,
+130 when interrupted.
+
+--follow does not exit at the first poll that ends the wait: it prints
+one line of compact JSON for it and goes on, from that line's cursor,
+until the merge request is merged or closed, --timeout, or an
+interruption. Every line has a "type" and the "cursor" to resume from
+(pass the last one read to --cursor):
+
+  {"type":"events","events":[...],"triggered_by":[...],"mr":{...},"cursor":"..."}
+  {"type":"warning","message":"cannot reach GitLab, trying again: ...","cursor":"..."}
+  {"type":"end","reason":"merged|closed|timeout|interrupted","cursor":"..."}
+  {"type":"error","error":"...","cursor":"..."}
+
+An events line is what the wait would have printed (events that did not
+end it are kept for the next one); merged or closed prints the last
+events line, then the end line. A warning line comes once per outage,
+and another when GitLab answers again. An error line comes before the
+usual exit code and message on stderr.`,
 		Example: `  glcli mr wait https://gitlab.com/group/project/-/merge_requests/123
   glcli mr wait group/project!123 --cursor eyJzIjoi... --timeout 2h
   glcli mr wait !123 --on state            # until merged or closed
   glcli mr wait !123 --on comment --ignore-author renovate`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			ctx := cmd.Context()
+			var prev mr.Cursor
+			var st *stream
+			if follow {
+				st = &stream{rt: rt, resume: func(l *streamLine) {
+					if prev.SHA != "" {
+						l.Cursor = prev.Encode()
+					} else if c, err := mr.DecodeCursor(cursor); err == nil {
+						l.Cursor = c.Encode()
+					}
+				}}
+				defer func() { st.stop(ctx, err) }()
+			}
 			if err := w.check(); err != nil {
 				return err
 			}
@@ -209,7 +239,6 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 			if err != nil {
 				return err
 			}
-			var prev mr.Cursor
 			if cursor != "" {
 				if prev, err = mr.DecodeCursor(cursor); err != nil {
 					return usageError{err}
@@ -222,6 +251,9 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 				prev = mr.NewCursor(s)
 			}
 			d := &mr.Differ{Client: m.client, People: m.people, MaxBodyChars: maxBody}
+			if follow {
+				return followMR(ctx, rt, st, m, d, &prev, mrFollowOptions{on: on, includeMine: includeMine, maxBody: maxBody, w: w})
+			}
 			type result struct {
 				Events      []mr.Event `json:"events"`
 				TriggeredBy []string   `json:"triggered_by,omitempty"`
@@ -249,12 +281,7 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 				if err != nil {
 					return false, err
 				}
-				var triggered []string
-				for _, e := range events {
-					if slices.Contains(on, e.Trigger()) && (!e.Mine || includeMine) && !slices.Contains(triggered, e.Trigger()) {
-						triggered = append(triggered, e.Trigger())
-					}
-				}
+				triggered := triggeredBy(events, on, includeMine)
 				// Merged or closed, whoever did it and whatever --on says:
 				// nothing more will happen, so do not wait forever.
 				final := s.MR.State == "merged" || s.MR.State == "closed"
@@ -285,11 +312,104 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Compute events against this cursor (from mr get or mr wait) instead of the state at start")
 	cmd.Flags().StringSliceVar(&on, "on", mr.DefaultTriggers, "Kinds of event that end the wait: "+strings.Join(mr.Triggers, ", "))
 	cmd.Flags().BoolVar(&includeMine, "include-mine", false, "Let my own pushes, approvals, resolves, merges and closes end the wait too")
+	cmd.Flags().BoolVar(&follow, "follow", false, "Do not exit: print one JSON line per poll that would have ended the wait, until merged or closed (see above)")
 	cmd.Flags().IntVar(&maxBody, "max-body-chars", 4000, "Cut comment bodies after this many characters (0: no limit)")
 	cmd.Flags().StringSliceVar(&ignore, "ignore-author", nil, "Usernames whose comments do not count (bots are already left out); repeatable")
 	cmd.Flags().StringSliceVar(&include, "include-author", nil, includeAuthorUsage)
 	addWaitFlags(cmd, &w, defaultMRInterval)
 	return cmd
+}
+
+// triggeredBy lists the kinds of the events that end the wait, once
+// each, in the order of the events: those in on, and mine only with
+// includeMine.
+func triggeredBy(events []mr.Event, on []string, includeMine bool) []string {
+	var triggered []string
+	for _, e := range events {
+		if slices.Contains(on, e.Trigger()) && (!e.Mine || includeMine) && !slices.Contains(triggered, e.Trigger()) {
+			triggered = append(triggered, e.Trigger())
+		}
+	}
+	return triggered
+}
+
+type mrFollowOptions struct {
+	on          []string
+	includeMine bool
+	maxBody     int
+	w           waitFlags
+}
+
+// mrEventsLine is a line of "mr wait --follow" for a poll that would have
+// ended the wait. The cursor is at the top, as in the other lines, and
+// not in mr.
+type mrEventsLine struct {
+	Type        string     `json:"type"`
+	Events      []mr.Event `json:"events"`
+	TriggeredBy []string   `json:"triggered_by,omitempty"`
+	MR          mr.View    `json:"mr"`
+	Cursor      string     `json:"cursor"`
+}
+
+// followMR is the loop of "mr wait --follow": the loop of mr wait, which
+// prints a line where mr wait would have exited, moves *prev to the
+// cursor of that line, and goes on. *prev only moves when a line is
+// printed: the events that did not end the wait (mine, kinds not in --on)
+// are printed with the next line, as mr wait prints them with the events
+// that end it, and every line's cursor is one from which a new mr wait
+// misses nothing.
+func followMR(ctx context.Context, rt *cli.Runtime, st *stream, m *mrContext, d *mr.Differ, prev *mr.Cursor, o mrFollowOptions) error {
+	timedOut, err := rt.PollNotify(ctx, o.w.interval, o.w.timeout, func() (bool, error) {
+		rt.ResetWarnings()
+		s, err := mr.Fetch(ctx, m.client, m.ref)
+		if err != nil {
+			return false, err
+		}
+		st.answered()
+		if err := prev.Check(s); err != nil {
+			return false, usageError{err}
+		}
+		if s.Unsettled {
+			return false, nil // a push is landing: look again next time
+		}
+		// At most two polls per diff version (see AwaitsPatchID): the
+		// events that came with the push wait with it, and come out
+		// together in the next line.
+		if d.AwaitsPatchID(ctx, *prev, s) {
+			return false, nil
+		}
+		events, err := d.Events(ctx, *prev, s)
+		if err != nil {
+			return false, err
+		}
+		triggered := triggeredBy(events, o.on, o.includeMine)
+		final := s.MR.State == "merged" || s.MR.State == "closed"
+		if len(triggered) == 0 && !final {
+			return false, nil
+		}
+		next := mr.NewCursor(s)
+		if len(events) > 0 {
+			warnTruncated(rt, s)
+			view := mr.NewView(s, m.people, mr.ViewOptions{MaxBodyChars: o.maxBody})
+			view.Cursor = ""
+			if err := rt.PrintLine(mrEventsLine{Type: "events", Events: events, TriggeredBy: triggered, MR: view, Cursor: next.Encode()}, "events"); err != nil {
+				return false, err
+			}
+		}
+		*prev = next
+		if final {
+			st.end(s.MR.State)
+			return true, nil
+		}
+		return false, nil
+	}, st.outage)
+	if err != nil {
+		return err
+	}
+	if timedOut {
+		st.end("timeout")
+	}
+	return nil
 }
 
 func newMRDiscussions(rt *cli.Runtime) *cobra.Command {

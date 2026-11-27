@@ -191,9 +191,37 @@ func (r *Runtime) Notef(format string, args ...any) {
 // list is printed as [] instead of being pruned, so that `jq '.items[]'`
 // sees "nothing" rather than a missing field.
 func (r *Runtime) Print(v any, lists ...string) error {
-	compact, err := output.MarshalCompact(v)
+	out, err := r.render(v, lists)
 	if err != nil {
 		return err
+	}
+	if output.Indented(r.Stdout) {
+		if out, err = output.Indent(out); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(r.Stdout, "%s\n", out)
+	return err
+}
+
+// PrintLine is Print for the lines of a stream (the --follow mode of the
+// wait commands): always one line of compact JSON, even on a terminal,
+// so that whoever reads the stream line by line gets one object per line.
+func (r *Runtime) PrintLine(v any, lists ...string) error {
+	out, err := r.render(v, lists)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(r.Stdout, "%s\n", out)
+	return err
+}
+
+// render returns v as compact pruned JSON with the pending warnings and
+// hints, and forgets them.
+func (r *Runtime) render(v any, lists []string) ([]byte, error) {
+	compact, err := output.MarshalCompact(v)
+	if err != nil {
+		return nil, err
 	}
 	r.mu.Lock()
 	warnings, hints := r.warnings, r.hints
@@ -227,13 +255,7 @@ func (r *Runtime) Print(v any, lists ...string) error {
 		}
 		out = append(append(out[:len(out)-1:len(out)-1], []byte(sep+string(name)+":"+string(b))...), '}')
 	}
-	if output.Indented(r.Stdout) {
-		if out, err = output.Indent(out); err != nil {
-			return err
-		}
-	}
-	_, err = fmt.Fprintf(r.Stdout, "%s\n", out)
-	return err
+	return out, nil
 }
 
 func topLevelKeys(data []byte) map[string]bool {
@@ -256,6 +278,17 @@ var wakeStep = 5 * time.Second
 // rate limit, GitLab failing) are retried, with one note on stderr; other
 // errors end the poll.
 func (r *Runtime) Poll(ctx context.Context, interval, timeout time.Duration, check func() (done bool, err error)) (timedOut bool, err error) {
+	return r.PollNotify(ctx, interval, timeout, check, nil)
+}
+
+// PollNotify is Poll, which also calls outage (when not nil) with the
+// error when GitLab stops answering: once per outage, when the note is
+// written on stderr. The --follow mode of the wait commands prints a line
+// for it.
+func (r *Runtime) PollNotify(ctx context.Context, interval, timeout time.Duration, check func() (done bool, err error), outage func(err error)) (timedOut bool, err error) {
+	if outage == nil {
+		outage = func(error) {}
+	}
 	var deadline time.Time
 	if timeout > 0 {
 		deadline = r.Now().Round(0).Add(timeout)
@@ -279,6 +312,7 @@ func (r *Runtime) Poll(ctx context.Context, interval, timeout time.Duration, che
 		case !failing:
 			r.Notef("cannot reach GitLab, trying again every %s: %v", interval, err)
 			failing = true
+			outage(err)
 		}
 		pause := interval
 		if !deadline.IsZero() {
