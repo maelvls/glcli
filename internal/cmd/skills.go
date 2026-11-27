@@ -49,9 +49,15 @@ entirely (files no longer shipped go away). A skill that is a symlink, such
 as one pointing at a checkout of glcli for development, is always left
 alone: remove the symlink to install a copy instead.
 
-Prints {dir, skills: [{name, path, status, reason}]}, status being
-installed, replaced or skipped. Run it again after upgrading glcli, with
---overwrite, to update the skills.`,
+Prints {dir, skills: [{name, path, status, reason, differs}]}, status
+being installed, replaced or skipped. Run it again after upgrading glcli,
+with --overwrite, to update the skills.
+
+A skipped skill is compared with the one embedded in this glcli (same
+files, same bytes): reason says whether it is identical, and differs is
+true when it is not, which means that the installed skill comes from
+another version of glcli or was edited. Nothing is written for that:
+without --overwrite, a skill already installed is only read.`,
 		Example: `  glcli skills install
   glcli skills install --overwrite
   glcli skills install --dir ./.claude/skills`,
@@ -73,8 +79,9 @@ installed, replaced or skipped. Run it again after upgrading glcli, with
 				return err
 			}
 			for _, r := range res {
-				if r.Status == "skipped" && !overwrite {
-					rt.Hintf("Some skills were already installed: pass --overwrite to replace them with this version of glcli's.")
+				// Not for a symlink: --overwrite leaves it alone.
+				if r.Status == "skipped" && r.Differs && !r.Symlink {
+					rt.Hintf("Some installed skills differ from this glcli's: pass --overwrite to replace them.")
 					break
 				}
 			}
