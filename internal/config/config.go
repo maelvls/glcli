@@ -35,6 +35,10 @@ type Host struct {
 	// ("oauth2_expiry_date"). It is zero when the config does not say, or
 	// says it in a way glcli cannot read.
 	Expiry time.Time
+	// Keyring says that glab keeps the token of this host in the keyring
+	// of the operating system ("use_keyring" is "true"), where glcli does
+	// not look, rather than in its config.
+	Keyring bool
 }
 
 // BaseURL is the scheme and host of the instance, without a trailing slash.
@@ -91,6 +95,7 @@ type rawConfig struct {
 		User        yaml.Node `yaml:"user"`
 		IsOAuth2    yaml.Node `yaml:"is_oauth2"`
 		Expiry      yaml.Node `yaml:"oauth2_expiry_date"`
+		UseKeyring  yaml.Node `yaml:"use_keyring"`
 	} `yaml:"hosts"`
 }
 
@@ -124,7 +129,7 @@ func Parse(data []byte, path string) (*Config, error) {
 		}
 		return s
 	}
-	// What glab writes about its OAuth logins is read the
+	// What glab writes about its OAuth logins and its keyring is read the
 	// way glab reads it: the text of the scalar, compared with "true", so
 	// that "true" in quotes (what glab writes) and the boolean true are the
 	// same. Anything else there is "no", and never an error: a file that
@@ -146,6 +151,7 @@ func Parse(data []byte, path string) (*Config, error) {
 			User:        str("user", h.User),
 			TokenSource: path,
 			OAuth:       flag(h.IsOAuth2),
+			Keyring:     flag(h.UseKeyring),
 		}
 		if host.OAuth {
 			s, _ := text(&h.Expiry)
@@ -260,11 +266,39 @@ func (c *Config) Host(name string) (Host, error) {
 			}
 		}
 	}
+	if h.Token == "" && ok {
+		return h, c.noTokenInFile(h)
+	}
 	if h.Token == "" {
 		known := c.Names()
 		return h, fmt.Errorf("no token for %s in %s (hosts there: %s): run `glab auth login --hostname %s`", name, c.Path, strings.Join(known, ", "), name)
 	}
 	return h, nil
+}
+
+// noTokenInFile is the error for a host that glab's config has, without a
+// token: the token is most likely in the keyring of the operating system,
+// which glcli does not read.
+//
+// Since glab 1.111.0, `glab auth login` stores the token there whenever
+// there is a keyring (not in CI), and leaves "use_keyring: true" and no
+// token in the file; --insecure-storage, new in that version, makes it
+// write the token to the file as before. From 1.84.0 to 1.110, the same
+// happened with --use-keyring only. Before 1.84.0, --use-keyring wrote no
+// "use_keyring" to the file. A host glab logged out of can be there
+// without a token too.
+func (c *Config) noTokenInFile(h Host) error {
+	why := "the host is there without a token: glab is logged out of it, or keeps its token in the keyring of the operating system, which glcli does not read"
+	login := "run `glab auth login --hostname " + h.Name + "`, with --insecure-storage if glab is 1.111.0 or later (it then writes the token to that file, in clear, instead of the keyring)"
+	if h.Keyring {
+		why = "glab keeps it in the keyring of the operating system (use_keyring is true for this host), which glcli does not read"
+		login = "run `glab auth login --hostname " + h.Name + " --insecure-storage` (glab 1.111.0 or later), which makes glab write the token to that file, in clear"
+	}
+	env := "set GLCLI_TOKEN to a personal access token"
+	if h.Name != c.Default() {
+		env = "set GLCLI_HOST=" + h.Name + " and GLCLI_TOKEN to a personal access token (GLCLI_TOKEN is only used for the default host, which is " + c.Default() + ")"
+	}
+	return fmt.Errorf("no token for %s in %s: %s. Either %s, or %s", h.Name, c.Path, why, login, env)
 }
 
 // Names lists the configured hosts, sorted.

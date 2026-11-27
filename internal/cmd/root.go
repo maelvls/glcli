@@ -163,9 +163,18 @@ is waiting on happens, and print it:
 A merge request is its URL, group/project!123, or !123 inside a git
 checkout of the project.
 
-Environment: GLCLI_HOST (default host), GLCLI_TOKEN or GITLAB_TOKEN (token
-for the default host), GLCLI_DEBUG=1 (trace each API call on stderr),
-GLCLI_COMMAND_TIMEOUT_MS (30000; the wait commands have no timeout).`,
+Environment: GLCLI_HOST (default host), GLCLI_TOKEN or GITLAB_TOKEN (a
+personal, project or group access token for the default host, used
+instead of glab's), GLCLI_DEBUG=1 (trace each API call on stderr),
+GLCLI_COMMAND_TIMEOUT_MS (30000; the wait commands have no timeout).
+
+Tokens: glcli reads the token glab wrote to its config file, whether glab
+logged in with a token or with OAuth. It does not read the keyring of the
+operating system, where glab 1.111.0 and later keep tokens unless
+"glab auth login" is given --insecure-storage: use that flag, or
+GLCLI_TOKEN. glcli never renews the token of an OAuth login, which expires
+after two hours: glab does when it calls GitLab ("glab auth status"), and
+glcli then reads the new one, even in the middle of a wait command.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

@@ -24,7 +24,11 @@ A host glab logged in to with OAuth has "token_kind": "oauth", and
 "expires_at" when glab's config says when its token expires. glcli never
 renews such a token: glab does, when it calls GitLab (for instance
 "glab auth status --hostname <host>"), and glcli reads the new one from
-glab's config, even in the middle of a wait command.`,
+glab's config, even in the middle of a wait command.
+
+A host has "keyring": true when glab keeps its token in the keyring of
+the operating system (its default since glab 1.111.0), where glcli does
+not read it: its token is then "missing", and a hint says what to do.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := rt.Config()
@@ -41,8 +45,12 @@ glab's config, even in the middle of a wait command.`,
 				// ExpiresAt is when glab's config says the OAuth token
 				// expires.
 				ExpiresAt string `json:"expires_at,omitempty"`
-				Default   bool   `json:"default,omitempty"`
-				APIURL    string `json:"api_url"`
+				// Keyring says that glab keeps the token of the host in
+				// the keyring of the operating system, where glcli does
+				// not read it.
+				Keyring bool   `json:"keyring,omitempty"`
+				Default bool   `json:"default,omitempty"`
+				APIURL  string `json:"api_url"`
 			}
 			var hosts []host
 			def := cfg.Default()
@@ -56,7 +64,11 @@ glab's config, even in the middle of a wait command.`,
 				if err != nil {
 					status = "missing"
 				}
-				row := host{Name: n, User: h.User, Token: status, Default: n == def, APIURL: h.BaseURL() + "/api/v4"}
+				row := host{Name: n, User: h.User, Token: status, Keyring: h.Keyring, Default: n == def, APIURL: h.BaseURL() + "/api/v4"}
+				if _, known := cfg.Hosts[n]; known && err != nil {
+					// Why the token is missing, and what to do about it.
+					rt.Hintf("%v.", err)
+				}
 				if h.OAuth {
 					row.TokenKind = "oauth"
 					if !h.Expiry.IsZero() {
