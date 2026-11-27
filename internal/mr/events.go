@@ -20,7 +20,8 @@ type Event struct {
 	At   *time.Time `json:"at,omitempty"`
 	// By is who did it, when known.
 	By string `json:"by,omitempty"`
-	// Mine is true when I did it (my push, my approval, my resolve).
+	// Mine is true when I did it (my push, my approval, my resolve, my
+	// merge, my close).
 	Mine bool `json:"mine,omitempty"`
 
 	// push

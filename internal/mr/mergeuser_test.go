@@ -123,6 +123,53 @@ func TestReopenedStateEventNamesNobody(t *testing.T) {
 	}
 }
 
+// The keys that mr get prints: closed_by and closed_at while closed, and
+// not on an open or a merged merge request.
+func TestViewJSONHasClosedByOnlyWhileClosed(t *testing.T) {
+	closedAt, mergedAt := at(40), at(30)
+	alice := &gitlab.User{Username: "alice"}
+	for _, tc := range []struct {
+		name   string
+		change func(m *gitlab.MergeRequest)
+		want   map[string]string // nil: neither key
+	}{
+		{name: "closed", change: func(m *gitlab.MergeRequest) {
+			m.State, m.ClosedBy, m.ClosedAt = "closed", alice, &closedAt
+		}, want: map[string]string{"closed_by": "alice", "closed_at": "2026-11-26T10:40:00Z"}},
+		{name: "closed, nobody named", change: func(m *gitlab.MergeRequest) {
+			m.State, m.ClosedAt = "closed", &closedAt
+		}, want: map[string]string{"closed_at": "2026-11-26T10:40:00Z"}},
+		{name: "opened", change: func(m *gitlab.MergeRequest) {}},
+		{name: "reopened, closed_by left behind", change: func(m *gitlab.MergeRequest) {
+			m.ClosedBy, m.ClosedAt = alice, &closedAt
+		}},
+		{name: "merged", change: func(m *gitlab.MergeRequest) {
+			m.State, m.MergeUser, m.MergedAt = "merged", alice, &mergedAt
+			m.ClosedBy, m.ClosedAt = alice, &closedAt
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := snapshot()
+			tc.change(&s.MR)
+			raw, err := json.Marshal(NewView(s, People{Me: "me"}, ViewOptions{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"closed_by", "closed_at"} {
+				v, present := got[key]
+				want, wanted := tc.want[key]
+				if present != wanted || (wanted && v != want) {
+					t.Errorf("%s = %v (present: %v), want %q (present: %v) in %s", key, v, present, want, wanted, raw)
+				}
+			}
+		})
+	}
+}
+
 // The struct tags are the field names of GitLab's merge request API.
 func TestMergeRequestDecodesMergeUserAndClosedBy(t *testing.T) {
 	const merged = `{

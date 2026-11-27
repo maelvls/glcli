@@ -148,15 +148,16 @@ state when the command starts. Kinds of events, selected with --on:
   pipeline  the head pipeline reaching a final status
 
 --on defaults to push,comment,thread,approval,state. What I did myself
-(my push, my approval, my resolve) does not end the wait unless
---include-mine. Every event since the cursor is printed, including those
-that did not end the wait, each with its "kind".
+(my push, my approval, my resolve, my merge, my close) does not end the
+wait unless --include-mine. Every event since the cursor is printed,
+including those that did not end the wait, each with its "kind".
 
 It polls every --interval (1m), keeps trying while GitLab cannot be
 reached (closed lid, VPN down), and has no time limit unless --timeout.
 Once the merge request is merged or closed, it returns whatever --on
-says (nothing more will happen to it), with a hint when nothing in --on
-happened. A cursor from another merge request is refused.
+says and whoever did it (nothing more will happen to it), with a hint
+and no triggered_by when no event ended the wait. A cursor from another
+merge request is refused.
 
 Prints {events, mr, triggered_by}. mr.cursor is the cursor to wait again.
 When --timeout runs out: events [], timed_out true, and mr.cursor is the
@@ -253,7 +254,7 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 	}
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Compute events against this cursor (from mr get or mr wait) instead of the state at start")
 	cmd.Flags().StringSliceVar(&on, "on", mr.DefaultTriggers, "Kinds of event that end the wait: "+strings.Join(mr.Triggers, ", "))
-	cmd.Flags().BoolVar(&includeMine, "include-mine", false, "Let my own pushes, approvals, resolves and merges end the wait too")
+	cmd.Flags().BoolVar(&includeMine, "include-mine", false, "Let my own pushes, approvals, resolves, merges and closes end the wait too")
 	cmd.Flags().IntVar(&maxBody, "max-body-chars", 4000, "Cut comment bodies after this many characters (0: no limit)")
 	cmd.Flags().StringSliceVar(&ignore, "ignore-author", nil, "Usernames whose comments do not count (bots are already left out); repeatable")
 	addWaitFlags(cmd, &w, defaultMRInterval)
