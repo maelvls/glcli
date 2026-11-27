@@ -301,9 +301,17 @@ func reviewItemWith(s *mr.Snapshot, p mr.People, trusted func() bool) Item {
 // kept the patch ID. Any doubt (the version cannot be asked, or read) is
 // false, and never an error.
 func patchIDsTrusted(ctx context.Context, c *gitlab.Client) bool {
+	// Every merge request that needs the answer waits for it: a GitLab
+	// slow to give its version must not make the inbox time out.
+	ctx, cancel := context.WithTimeout(ctx, versionTimeout)
+	defer cancel()
 	major, minor, err := gitlab.ServerVersion(ctx, c)
 	return err == nil && (major > 18 || major == 18 && minor >= 2)
 }
+
+// versionTimeout is how long GitLab is given to say its version. A
+// variable for the tests.
+var versionTimeout = 5 * time.Second
 
 // unseenPush reports whether the pushes since my last action left me
 // something to look at, and since when. They did not when the diff
@@ -336,15 +344,14 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 	if !same {
 		return at, true
 	}
-	// The changes are the ones I saw: only a doubt keeps the push.
+	// The changes are the ones I saw: only a doubt keeps the push. With
+	// both doubts, the later date: the push that took my approval away,
+	// or the retarget.
 	retargeted, approvalGone := doubts(s, me, a.myLast)
-	switch {
-	case !retargeted.IsZero():
-		return later(at, retargeted), true
-	case approvalGone:
-		return at, true
+	if retargeted.IsZero() && !approvalGone {
+		return time.Time{}, false
 	}
-	return time.Time{}, false
+	return later(at, retargeted), true
 }
 
 // doubts reads in the system notes what an unchanged patch ID does not
@@ -352,7 +359,7 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 // (the same changes now go to another branch), and whether GitLab took my
 // approval away.
 func doubts(s *mr.Snapshot, me string, myLast time.Time) (retargeted time.Time, approvalGone bool) {
-	var approved, withdrawn time.Time
+	var approved, withdrawn, rerequested time.Time
 	for _, d := range s.Discussions {
 		for _, n := range d.Notes {
 			if !n.System {
@@ -360,6 +367,10 @@ func doubts(s *mr.Snapshot, me string, myLast time.Time) (retargeted time.Time, 
 			}
 			if n.CreatedAt.After(myLast) && (strings.HasPrefix(n.Body, "changed target branch") || strings.Contains(n.Body, "This merge request now targets")) {
 				retargeted = later(retargeted, n.CreatedAt)
+			}
+			// Requesting my review again removes my approval, without a note.
+			if !n.CreatedAt.After(myLast) && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
+				rerequested = later(rerequested, n.CreatedAt)
 			}
 			if n.Author.Username != me {
 				continue
@@ -376,10 +387,18 @@ func doubts(s *mr.Snapshot, me string, myLast time.Time) (retargeted time.Time, 
 		return retargeted, false
 	}
 	// I approved and did not take it back, yet I am not among the
-	// approvers: a push removed my approval. A push between my approval
-	// and my last action means I acted since without it, and know.
+	// approvers: GitLab removed my approval. I know it if, between my
+	// approval and my last action, my review was requested again or a
+	// push changed the patch I approved: I acted since without it.
+	if rerequested.After(approved) {
+		return retargeted, false
+	}
+	i := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(approved) })
+	if i < 0 || s.Versions[i].PatchIDSHA == "" {
+		return retargeted, true // what I approved is not known
+	}
 	knew := slices.ContainsFunc(s.Versions, func(v gitlab.Version) bool {
-		return v.CreatedAt.After(approved) && !v.CreatedAt.After(myLast)
+		return v.CreatedAt.After(approved) && !v.CreatedAt.After(myLast) && v.PatchIDSHA != "" && v.PatchIDSHA != s.Versions[i].PatchIDSHA
 	})
 	return retargeted, !knew
 }

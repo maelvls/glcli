@@ -172,6 +172,59 @@ func rebaseTests() []rebaseTest {
 			notes:    []gitlab.Note{approval, note(2, "me", 6, "fine", false)},
 		},
 		{
+			name:     "approved, rebased (my approval stays), commented, changed, then back to what I approved: my approval is gone",
+			versions: []gitlab.Version{version(10, "A"), version(8, "B"), version(5, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "me", 6, "by the way", false)},
+			want:     []string{"new_commits"}, at: 10,
+		},
+		{
+			name:     "approved, rebased (my approval stays), commented, then a rebase removed my approval",
+			versions: []gitlab.Version{version(8, "A"), version(5, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "me", 6, "by the way", false)},
+			want:     []string{"new_commits"}, at: 8,
+		},
+		{
+			name:     "a push without a patch ID between my approval and my comment proves nothing",
+			versions: []gitlab.Version{version(10, "A"), version(7, "A"), version(5, ""), opened},
+			notes:    []gitlab.Note{approval, note(2, "me", 8, "by the way", false)},
+			want:     []string{"new_commits"}, at: 10,
+		},
+		{
+			name:     "what I approved has no patch ID",
+			versions: []gitlab.Version{version(8, "B"), version(5, "B"), version(2, "")},
+			notes:    []gitlab.Note{approval, note(2, "me", 6, "fine", false)},
+			want:     []string{"new_commits"}, at: 8,
+		},
+		{
+			name:     "what I approved is the newest version before my approval, not the first one",
+			versions: []gitlab.Version{version(10, "B"), version(7, "B"), version(4, "B"), opened},
+			notes:    []gitlab.Note{note(1, "me", 5, approvedNote, true), note(2, "me", 8, "by the way", false)},
+			want:     []string{"new_commits"}, at: 10,
+		},
+		{
+			name:     "approved, my review was requested again, I commented, then rebased: I know my approval is gone",
+			versions: []gitlab.Version{version(8, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "bob", 5, "requested review from @me", true), note(3, "me", 6, "again?", false)},
+		},
+		{
+			name:     "what I approved is the version pushed at the instant of my approval, not the one before",
+			versions: []gitlab.Version{version(10, "B"), version(5, "B"), version(3, "B"), opened},
+			notes:    []gitlab.Note{approval, note(2, "me", 6, "by the way", false)},
+			want:     []string{"new_commits"}, at: 10,
+		},
+		{
+			name:     "my review was requested before my approval: it says nothing",
+			versions: []gitlab.Version{version(5, "A"), opened},
+			notes:    []gitlab.Note{note(1, "bob", 1, "requested review from @me", true), note(2, "me", 3, approvedNote, true)},
+			want:     []string{"new_commits"}, at: 5,
+		},
+		{
+			name:     "the review of someone else was requested again",
+			versions: []gitlab.Version{version(8, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "bob", 5, "requested review from @meg", true), note(3, "me", 6, "fine", false)},
+			want:     []string{"new_commits"}, at: 8,
+		},
+		{
 			name:     "a version pushed at the instant of my approval is the one I approved",
 			versions: []gitlab.Version{version(5, "A"), version(3, "A")},
 			notes:    []gitlab.Note{approval},
@@ -244,6 +297,30 @@ func rebaseTests() []rebaseTest {
 				note(4, "bob", 8, retargetNote, true),
 			},
 			want: []string{"new_commits"}, at: 9,
+		},
+		{
+			name:     "changed, then retargeted: still dated from the change",
+			versions: []gitlab.Version{version(5, "B"), opened},
+			notes:    []gitlab.Note{note(1, "me", 3, "nit", false), note(2, "bob", 8, retargetNote, true)},
+			want:     []string{"new_commits"}, at: 5,
+		},
+		{
+			name:     "changed, rebased, then retargeted: still dated from the change",
+			versions: []gitlab.Version{version(8, "B"), version(5, "B"), opened},
+			notes:    []gitlab.Note{note(1, "me", 3, "nit", false), note(2, "bob", 9, retargetNote, true)},
+			want:     []string{"new_commits"}, at: 5,
+		},
+		{
+			name:     "a rebase removed my approval, then retargeted: dated from the retarget",
+			versions: []gitlab.Version{version(5, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "bob", 8, retargetNote, true)},
+			want:     []string{"new_commits"}, at: 8,
+		},
+		{
+			name:     "retargeted, then a rebase removed my approval: dated from the rebase",
+			versions: []gitlab.Version{version(5, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "bob", 4, retargetNote, true)},
+			want:     []string{"new_commits"}, at: 5,
 		},
 		{
 			name:     "retargeted before my review, then rebased",
@@ -395,10 +472,12 @@ type fakeGitLab struct {
 	updatedAt time.Time
 
 	mu sync.Mutex
-	// release is the "version" of GET /version; releaseStatus, when set,
+	// release is the "version" of GET /metadata; releaseStatus, when set,
 	// is answered instead.
 	release       string
 	releaseStatus int
+	// releaseHangs makes GET /metadata never answer.
+	releaseHangs  bool
 	releaseCalls  int
 	versionsQuery string
 	others        []string
@@ -449,8 +528,15 @@ func (f *fakeGitLab) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/v4/todos":
 		_, _ = w.Write([]byte(f.todos))
 		return
-	case path == "/api/v4/version":
+	case path == "/api/v4/metadata":
 		f.releaseCalls++
+		if f.releaseHangs {
+			// Until the client gives up; the other requests go on.
+			f.mu.Unlock()
+			<-r.Context().Done()
+			f.mu.Lock()
+			return
+		}
 		if f.releaseStatus != 0 {
 			http.Error(w, `{"message":"failed"}`, f.releaseStatus)
 			return
@@ -478,14 +564,14 @@ func (f *fakeGitLab) check(t *testing.T, calls int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.releaseCalls != calls {
-		t.Errorf("GET /version asked %d times, want %d", f.releaseCalls, calls)
+		t.Errorf("GET /metadata asked %d times, want %d", f.releaseCalls, calls)
 	}
 	if len(f.others) != 0 {
 		t.Errorf("unexpected requests: %v", f.others)
 	}
 }
 
-// hosts numbers the fake hosts: what a host answered to GET /version is
+// hosts numbers the fake hosts: what a host answered to GET /metadata is
 // remembered for as long as the process lives.
 var hosts atomic.Int64
 
@@ -598,6 +684,34 @@ func TestCollectAsksTheVersionOnce(t *testing.T) {
 		}
 	}
 	f.check(t, 1)
+}
+
+// A GitLab that does not say its version must not hold the inbox until
+// the command times out: after versionTimeout the patch IDs are not
+// trusted, for this poll only.
+func TestCollectDoesNotWaitForTheVersion(t *testing.T) {
+	old := versionTimeout
+	versionTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { versionTimeout = old })
+
+	f := &fakeGitLab{versions: rebased, release: "18.5.1-ee", todos: "[]", releaseHangs: true, notes: []gitlab.Note{note(1, "me", 3, "nit", false)}}
+	c := f.client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := Collect(ctx, c, Options{Host: c.Host.Name, People: me, Roles: Roles{Review: true, Todo: true}})
+	if err != nil || len(res.Warnings) != 0 || len(res.Items) != 1 || !slices.Equal(res.Items[0].Reasons, []string{"new_commits"}) {
+		t.Fatalf("GitLab not answering: res = %+v, err = %v", res, err)
+	}
+	f.check(t, 1)
+
+	// Not remembered: asked again at the next poll.
+	f.mu.Lock()
+	f.releaseHangs = false
+	f.mu.Unlock()
+	if got := collect(t, c, Roles{Review: true, Todo: true}).Reasons; len(got) != 0 {
+		t.Errorf("GitLab back: reasons = %v, want none", got)
+	}
+	f.check(t, 2)
 }
 
 // A merge request without a reason of its own is dated from its to-do

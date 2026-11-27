@@ -6,8 +6,8 @@ import (
 	"sync"
 )
 
-// serverVersions remembers what each host answered to GET /version, for
-// as long as the process lives: a command that polls asks once.
+// serverVersions remembers the version each host gave, for as long as the
+// process lives: a command that polls asks once.
 var serverVersions sync.Map
 
 // ServerVersion returns the major and minor version of the instance: 18
@@ -19,7 +19,8 @@ func ServerVersion(ctx context.Context, c *Client) (major, minor int, err error)
 		var out struct {
 			Version string `json:"version"`
 		}
-		if err := c.Get(ctx, "version", nil, &out); err != nil {
+		// Not GET /version, which answers the same but is deprecated.
+		if err := c.Get(ctx, "metadata", nil, &out); err != nil {
 			return 0, 0, err
 		}
 		v = out.Version

@@ -13,7 +13,7 @@ import (
 	"github.com/maelvls/glcli/internal/config"
 )
 
-// releaseServer answers GET /api/v4/version and counts the requests.
+// releaseServer answers GET /api/v4/metadata and counts the requests.
 type releaseServer struct {
 	// answer is the body; with status set, it is an error.
 	answer string
@@ -22,7 +22,7 @@ type releaseServer struct {
 }
 
 func (f *releaseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/api/v4/version" {
+	if r.URL.Path != "/api/v4/metadata" {
 		http.NotFound(w, r)
 		return
 	}
