@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"context"
 	"slices"
 	"testing"
 
@@ -95,22 +94,22 @@ func TestGoneCommitsAreAskedOnce(t *testing.T) {
 			t.Errorf("push = %+v, want unknown and no commits", e)
 		}
 	}
-	want := []string{"hash base1..head1", "hash base2..head2", "commits base2..head2"}
+	// Without the old diff, the new one is not asked for.
+	want := []string{"hash base1..head1", "commits base2..head2"}
 	if got := f.requests(); !slices.Equal(got, want) {
 		t.Errorf("asked %v, want %v", got, want)
 	}
 
-	// While GitLab fails, the diffs are not known and nothing is kept:
-	// the error goes to the caller, who polls again.
-	f = &differFake{release: "17.11.4", compareStatus: 500}
+	// The new commits are gone, not the old ones.
+	f = &differFake{release: "17.11.4", compare: map[string]string{"base1..head1": comparison(sameDiff)}}
 	d = &Differ{Client: f.client(t), People: People{Me: "me"}}
-	if _, err := d.Events(context.Background(), prev, s); !gitlab.IsStatus(err, 500) {
-		t.Errorf("GitLab failing: err = %v, want the 500", err)
+	for range 3 {
+		if e := onlyPush(t, d, prev, s); rebaseOnly(e) != "unknown" {
+			t.Errorf("push = %+v, want unknown", e)
+		}
 	}
-	f.mu.Lock()
-	f.compareStatus, f.compare = 0, map[string]string{"base1..head1": comparison(sameDiff), "base2..head2": comparison(sameDiff)}
-	f.mu.Unlock()
-	if e := onlyPush(t, d, prev, s); rebaseOnly(e) != "true" {
-		t.Errorf("GitLab back: push = %+v, want a rebase", e)
+	want = []string{"hash base1..head1", "hash base2..head2", "commits base2..head2"}
+	if got := f.requests(); !slices.Equal(got, want) {
+		t.Errorf("asked %v, want %v", got, want)
 	}
 }

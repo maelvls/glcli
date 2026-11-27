@@ -26,9 +26,10 @@ type differFake struct {
 	releaseStatus int
 	// compare maps "from..to" to the raw JSON answer of the comparison;
 	// a pair that is absent answers 404. With compareStatus set, every
-	// comparison fails with it.
+	// comparison fails with it; with compareHangs, none is answered.
 	compare       map[string]string
 	compareStatus int
+	compareHangs  bool
 	// asked lists the requests: "metadata", "hash from..to" (a direct
 	// comparison, for the diff) and "commits from..to".
 	asked []string
@@ -53,6 +54,13 @@ func (f *differFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			what = "hash "
 		}
 		f.asked = append(f.asked, what+key)
+		if f.compareHangs {
+			// Until the client gives up.
+			f.mu.Unlock()
+			<-r.Context().Done()
+			f.mu.Lock()
+			return
+		}
 		if f.compareStatus != 0 {
 			http.Error(w, `{"message":"failed"}`, f.compareStatus)
 			return
