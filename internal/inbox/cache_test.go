@@ -298,9 +298,8 @@ func TestCacheRequestsPerPoll(t *testing.T) {
 // approvals of those I approved.
 func TestCacheReadsWhatUpdatedAtDoesNotCover(t *testing.T) {
 	f := &pollGitLab{mrs: map[int]*pollMR{
-		// Mine, its pipeline running.
-		1: {author: "me", updatedAt: at(3), versions: []gitlab.Version{version(2, "A")},
-			pipeline: &gitlab.PipelineRef{ID: 7, Status: "running", SHA: "head2", UpdatedAt: at(2)}},
+		// Mine, without a pipeline yet.
+		1: {author: "me", updatedAt: at(3), versions: []gitlab.Version{version(2, "A")}},
 		// Approved by me at :03, rebased at :05: my approval stayed.
 		2: {author: "bob", updatedAt: at(5), versions: []gitlab.Version{version(5, "A"), version(2, "A")},
 			notes: []gitlab.Note{note(1, "me", 3, approvedNote, true)}, approvedBy: []string{"me", "alice"}},
@@ -325,7 +324,16 @@ func TestCacheReadsWhatUpdatedAtDoesNotCover(t *testing.T) {
 		t.Errorf("nothing changed: items = %+v", res.Items)
 	}
 
-	// The pipeline fails: GitLab does not touch the merge request.
+	// A pipeline is created, then fails: GitLab does not touch the merge
+	// request for either.
+	f.change(func(mrs map[int]*pollMR) {
+		mrs[1].pipeline = &gitlab.PipelineRef{ID: 7, Status: "running", SHA: "head2", UpdatedAt: at(35)}
+	})
+	res, _, counts = p.poll(interval)
+	check("pipeline created", counts, steady)
+	if got := item(t, res, 1); got.Waiting() || got.Pipeline != "running" {
+		t.Errorf("pipeline created: reasons = %v, pipeline %q", got.Reasons, got.Pipeline)
+	}
 	f.change(func(mrs map[int]*pollMR) {
 		mrs[1].pipeline = &gitlab.PipelineRef{ID: 7, Status: "failed", SHA: "head2", UpdatedAt: at(40)}
 	})
@@ -455,6 +463,10 @@ func TestCacheKeepsNothingUntilSettled(t *testing.T) {
 	// And kept again: it was read long after its updated_at was first seen.
 	if _, total, counts := p.poll(short); total != 1 {
 		t.Errorf("after the 20 minutes read: %d requests, want 1: %v", total, counts)
+	}
+	// A clock set back says nothing about the age of what is kept.
+	if _, total, counts := p.poll(-time.Hour); total != 5 {
+		t.Errorf("clock set back: %d requests, want 5: %v", total, counts)
 	}
 }
 
