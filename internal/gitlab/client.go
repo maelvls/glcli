@@ -34,16 +34,27 @@ func New(h config.Host) *Client {
 	return &Client{Host: h, HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: keepTokenOnHost}}
 }
 
-// keepTokenOnHost drops the token when a redirect leaves the host: Go
-// only strips Authorization and cookies, not PRIVATE-TOKEN.
+// keepTokenOnHost drops the token, whichever header it is in, when a
+// redirect leaves the host or goes from https to http on it. Go only
+// strips Authorization and cookies, not PRIVATE-TOKEN, keeps them for a
+// subdomain and another port, and does not look at the scheme.
 func keepTokenOnHost(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
-	if req.URL.Host != via[0].URL.Host {
+	if leavesHost(via[0].URL, req.URL) {
 		req.Header.Del("PRIVATE-TOKEN")
+		req.Header.Del("Authorization")
 	}
 	return nil
+}
+
+// leavesHost says whether a request first sent to from must go to to
+// without the token: to is another host (or another port), or the same
+// one over http when the token was first sent over https, where it would
+// travel in clear.
+func leavesHost(from, to *url.URL) bool {
+	return to.Host != from.Host || from.Scheme == "https" && to.Scheme != "https"
 }
 
 // APIError is a non-2xx answer from GitLab.
@@ -62,6 +73,9 @@ type APIError struct {
 	TokenSource string
 	// RedirectedTo is the host that answered, when a redirect left the
 	// host of the request: it was not sent the token (see keepTokenOnHost).
+	// When the token was not sent to the host of the request itself (a
+	// redirect from https to http on it), it is that host with the scheme,
+	// such as "http://gitlab.example.com".
 	RedirectedTo string
 }
 
@@ -149,8 +163,14 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		apiErr := &APIError{Host: c.Host.Name, TokenSource: c.Host.TokenSource, Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
-		if final := resp.Request.URL.Host; final != req.URL.Host {
-			apiErr.RedirectedTo = final
+		// On the host of the request, the request that was answered tells
+		// whether the token went with it: not after a redirect to http,
+		// and Go does not put Authorization back on a redirect that comes
+		// back to the host after leaving it.
+		if final := resp.Request; final.URL.Host != req.URL.Host {
+			apiErr.RedirectedTo = final.URL.Host
+		} else if c.Host.Token != "" && final.Header.Get("PRIVATE-TOKEN") == "" && final.Header.Get("Authorization") == "" {
+			apiErr.RedirectedTo = final.URL.Scheme + "://" + final.URL.Host
 		}
 		return nil, apiErr
 	}
