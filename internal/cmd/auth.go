@@ -26,9 +26,11 @@ renews such a token: glab does, when it calls GitLab (for instance
 "glab auth status --hostname <host>"), and glcli reads the new one from
 glab's config, even in the middle of a wait command.
 
-A host has "keyring": true when glab keeps its token in the keyring of
-the operating system (its default since glab 1.111.0), where glcli does
-not read it: its token is then "missing", and a hint says what to do.`,
+A host whose token is "missing" has "keyring": true when glab's config
+says that glab keeps it in the keyring of the operating system (its
+default since glab 1.111.0), where glcli does not read it. A hint says
+what to do about a missing token, for such a host and for the default
+host.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := rt.Config()
@@ -45,9 +47,9 @@ not read it: its token is then "missing", and a hint says what to do.`,
 				// ExpiresAt is when glab's config says the OAuth token
 				// expires.
 				ExpiresAt string `json:"expires_at,omitempty"`
-				// Keyring says that glab keeps the token of the host in
-				// the keyring of the operating system, where glcli does
-				// not read it.
+				// Keyring says that the token is missing because glab
+				// keeps it in the keyring of the operating system, where
+				// glcli does not read it.
 				Keyring bool   `json:"keyring,omitempty"`
 				Default bool   `json:"default,omitempty"`
 				APIURL  string `json:"api_url"`
@@ -64,9 +66,14 @@ not read it: its token is then "missing", and a hint says what to do.`,
 				if err != nil {
 					status = "missing"
 				}
-				row := host{Name: n, User: h.User, Token: status, Keyring: h.Keyring, Default: n == def, APIURL: h.BaseURL() + "/api/v4"}
-				if _, known := cfg.Hosts[n]; known && err != nil {
-					// Why the token is missing, and what to do about it.
+				row := host{Name: n, User: h.User, Token: status, Keyring: h.Keyring && err != nil, Default: n == def, APIURL: h.BaseURL() + "/api/v4"}
+				// Why the token is missing, and what to do about it: for
+				// the host glcli uses unless told otherwise, and for one
+				// whose token is known to be in the keyring. Not for
+				// every host without a token: glab's config comes with
+				// gitlab.com in it, with an empty token, and someone who
+				// only uses another instance has nothing to do about it.
+				if err != nil && (n == def || h.Keyring) {
 					rt.Hintf("%v.", err)
 				}
 				if h.OAuth {

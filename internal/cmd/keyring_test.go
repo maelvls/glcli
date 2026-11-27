@@ -111,3 +111,112 @@ func TestUnknownHostSaysHowToLogIn(t *testing.T) {
 		t.Errorf("got %s", got)
 	}
 }
+
+// glab's config comes with gitlab.com in it, with an empty token. Someone
+// who only logged in to another instance, which is their default host,
+// gets no hint about gitlab.com at each "auth status": its token is shown
+// as missing, and that is all.
+func TestAuthStatusDoesNotHintAtEveryHostWithoutAToken(t *testing.T) {
+	rt, stdout, stderr, _ := fakeGitLabOnDisk(t, noRequest(t), `
+host: code.pan.run
+hosts:
+    gitlab.com:
+        token:
+        api_protocol: https
+    out.example.com:
+        user: me
+    code.pan.run:
+        user: me
+        token: glpat-SECRET
+`)
+	if code := run(rt, []string{"auth", "status"}); code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, stderr.String())
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, stdout.String())
+	}
+	if _, ok := got["hints"]; ok {
+		t.Errorf("no hint expected, got %s", got["hints"])
+	}
+	if out := stdout.String(); strings.Count(out, `"token":"missing"`) != 2 || strings.Contains(out, "keyring") {
+		t.Errorf("want gitlab.com and out.example.com with a missing token and nothing else, got %s", out)
+	}
+}
+
+// The default host without a token gets the hint, in the config or not:
+// glcli uses it unless told otherwise.
+func TestAuthStatusHintsAtTheDefaultHostWithoutAToken(t *testing.T) {
+	for name, config := range map[string]string{
+		"in the config, with an empty token": "hosts:\n    gitlab.com:\n        token:\n    code.pan.run:\n        token: glpat-SECRET\n",
+		"not in the config":                  "hosts:\n    code.pan.run:\n        token: glpat-SECRET\n",
+	} {
+		rt, stdout, stderr, _ := fakeGitLabOnDisk(t, noRequest(t), config)
+		if code := run(rt, []string{"auth", "status"}); code != 0 {
+			t.Fatalf("%s: exit %d (stderr: %s)", name, code, stderr.String())
+		}
+		var got struct{ Hints []string }
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("%s: %v: %s", name, err, stdout.String())
+		}
+		if len(got.Hints) != 1 || !strings.HasPrefix(got.Hints[0], "no token for gitlab.com in ") || !strings.Contains(got.Hints[0], "`glab auth login --hostname gitlab.com` (with --insecure-storage if glab is 1.111.0 or later") {
+			t.Errorf("%s: hints: %q", name, got.Hints)
+		}
+	}
+}
+
+// "keyring": true is for a token that is missing because of the keyring.
+// A host with use_keyring and a token in the file, which glcli uses, is
+// shown like any host with a token.
+func TestAuthStatusKeyringOnlyWhenTheTokenIsMissing(t *testing.T) {
+	rt, stdout, stderr, path := fakeGitLabOnDisk(t, noRequest(t), `
+host: gitlab.com
+hosts:
+    gitlab.com:
+        user: me
+        use_keyring: "true"
+        token: glpat-SECRET
+    code.pan.run:
+        user: me
+        use_keyring: "true"
+    file.example.com:
+        use_keyring: "false"
+        token: glpat-SECRET
+`)
+	if code := run(rt, []string{"auth", "status"}); code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, stderr.String())
+	}
+	var got struct {
+		Hosts []map[string]any
+		Hints []string
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil || len(got.Hosts) != 3 {
+		t.Fatalf("%v: %s", err, stdout.String())
+	}
+	for _, h := range got.Hosts {
+		_, keyring := h["keyring"]
+		switch h["name"] {
+		case "code.pan.run":
+			if h["keyring"] != true || h["token"] != "missing" {
+				t.Errorf("the token in the keyring: %v", h)
+			}
+		default:
+			if keyring || h["token"] != "from "+path {
+				t.Errorf("a token in the file: %v", h)
+			}
+		}
+	}
+	// One hint: for code.pan.run, whose token is in the keyring.
+	if len(got.Hints) != 1 || !strings.HasPrefix(got.Hints[0], "no token for code.pan.run in ") || !strings.Contains(got.Hints[0], "set GLCLI_HOST=code.pan.run and GLCLI_TOKEN") {
+		t.Errorf("hints: %q", got.Hints)
+	}
+	// With a token from the environment for the default host too.
+	rt, stdout, stderr, _ = fakeGitLabOnDisk(t, noRequest(t), keyringConfig)
+	t.Setenv("GLCLI_TOKEN", "glpat-env-SECRET")
+	if code := run(rt, []string{"auth", "status"}); code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, stderr.String())
+	}
+	if out := stdout.String(); strings.Contains(out, "keyring") || strings.Contains(out, "hints") || !strings.Contains(out, `"token":"from $GLCLI_TOKEN"`) {
+		t.Errorf("gitlab.com has a token, from the environment: got %s", out)
+	}
+}
