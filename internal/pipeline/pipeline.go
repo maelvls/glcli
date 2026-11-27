@@ -277,6 +277,8 @@ type Found struct {
 	// SHA is the commit: the head of the merge request (in full), or
 	// the SHA asked for.
 	SHA string
+	// Head is the head commit of the merge request.
+	Head string
 	// Unconfirmed is the head pipeline of the merge request when ID is 0
 	// and that pipeline may well be the pipeline of the head commit: it
 	// runs on a merged-results or merge-train commit that cannot be read
@@ -301,7 +303,7 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 	if head {
 		sha = m.SHA
 	}
-	found := Found{SHA: sha}
+	found := Found{SHA: sha, Head: m.SHA}
 	unconfirmed := 0
 	hp := m.HeadPipeline
 	if hp != nil {

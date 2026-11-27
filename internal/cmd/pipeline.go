@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -44,10 +46,22 @@ type pipelineFlags struct {
 }
 
 func addPipelineFlags(cmd *cobra.Command, f *pipelineFlags) {
-	cmd.Flags().StringVar(&f.sha, "sha", "", "For a merge request: the pipeline of this commit, a full or abbreviated SHA (default: the head commit)")
+	cmd.Flags().StringVar(&f.sha, "sha", "", "For a merge request: the pipeline of this commit of the merge request, 7 to 40 hexadecimal characters (default: its head commit)")
 	cmd.Flags().IntVar(&f.logLines, "log-lines", 40, "Lines of log to print for each failed job (0: none)")
 	cmd.Flags().BoolVar(&f.includeAllowed, "include-allowed", false, "Also list failed jobs that are allowed to fail")
 	cmd.Flags().BoolVar(&f.noDownstream, "no-downstream", false, "Do not follow trigger jobs into downstream pipelines")
+}
+
+var commitSHA = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+
+// check reads --sha as GitLab writes commits, in lower case. A shorter
+// prefix would match about any commit, and a name such as HEAD none.
+func (f *pipelineFlags) check() error {
+	f.sha = strings.ToLower(f.sha)
+	if f.sha != "" && !commitSHA.MatchString(f.sha) {
+		return usagef("--sha must be the SHA of a commit of the merge request, 7 to 40 hexadecimal characters, got %q", f.sha)
+	}
+	return nil
 }
 
 func (f pipelineFlags) options() pipeline.Options {
@@ -62,6 +76,9 @@ type pipelineTarget struct {
 	id      int
 	mr      *ref.MR
 	sha     string
+	// head is the head commit of the merge request: sha, unless --sha
+	// names another commit.
+	head string
 	// unconfirmed is the head pipeline of the merge request when id is 0
 	// and GitLab cannot tell whether it ran on sha (see pipeline.Found).
 	unconfirmed int
@@ -99,8 +116,18 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 	if err != nil {
 		return err
 	}
-	t.id, t.sha, t.unconfirmed = found.ID, found.SHA, found.Unconfirmed
+	t.id, t.sha, t.head, t.unconfirmed = found.ID, found.SHA, found.Head, found.Unconfirmed
 	return nil
+}
+
+// noPipelineHint says why the commit has no pipeline, as far as can be
+// told. A --sha that is not the head gets no pipeline later: either none
+// ran on it, or it was not found.
+func (t *pipelineTarget) noPipelineHint() string {
+	if t.sha != t.head {
+		return fmt.Sprintf("None of the 20 most recent pipelines of this merge request ran on %s, which is not its head commit (%s): check that it is a commit of this merge request. Older pipelines are not looked at.", t.sha, t.head)
+	}
+	return "The likely causes: " + noPipelineCauses + "."
 }
 
 // unconfirmedWarning says that a head pipeline could not be tied to the
@@ -153,6 +180,9 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			if err := f.check(); err != nil {
+				return err
+			}
 			t, err := openPipeline(rt, args[0])
 			if err != nil {
 				return err
@@ -164,7 +194,11 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 				if t.unconfirmed != 0 {
 					rt.Warnf("%s", unconfirmedWarning(t.unconfirmed, t.sha))
 				}
-				rt.Hintf("No pipeline for %s: GitLab may still be creating it (it takes a few seconds after a push), or this commit will never have one (%s). `glcli pipeline wait` waits for it, and prints \"no_pipeline\": true when none is created.", t.sha, noPipelineCauses)
+				if t.sha != t.head {
+					rt.Hintf("%s", t.noPipelineHint())
+				} else {
+					rt.Hintf("No pipeline for %s: GitLab may still be creating it (it takes a few seconds after a push), or this commit will never have one (%s). `glcli pipeline wait` waits for it, and prints \"no_pipeline\": true when none is created.", t.sha, noPipelineCauses)
+				}
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha}, "failed_jobs")
 			}
 			r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options())
@@ -218,6 +252,9 @@ pipeline), 1 on error, 130 when interrupted.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if err := w.check(); err != nil {
+				return err
+			}
+			if err := f.check(); err != nil {
 				return err
 			}
 			if createTimeout < 0 {
@@ -319,7 +356,7 @@ pipeline), 1 on error, 130 when interrupted.`,
 				return err
 			}
 			if noPipeline {
-				rt.Hintf("GitLab created no pipeline for %s within %s (--create-timeout), so there is nothing to wait for. The likely causes: %s. If a pipeline is still expected, run the same command again, with a longer --create-timeout.", t.sha, createTimeout, noPipelineCauses)
+				rt.Hintf("GitLab created no pipeline for %s within %s (--create-timeout), so there is nothing to wait for. %s If a pipeline is still expected, run the same command again, with a longer --create-timeout.", t.sha, createTimeout, t.noPipelineHint())
 				return rt.Print(pipelineResult{Report: &pipeline.Report{}, SHA: t.sha, NoPipeline: true}, "failed_jobs")
 			}
 			if t.id == 0 {

@@ -122,7 +122,7 @@ func TestForMRFindsMergedResultsPipelineOfAnOlderCommit(t *testing.T) {
 					t.Fatal(err)
 				}
 				// 93 and 90 ran on it: the newest wins.
-				if want := (Found{ID: 93, SHA: sha}); got != want {
+				if want := (Found{ID: 93, SHA: sha, Head: headSHA}); got != want {
 					t.Errorf("ForMR(%s) = %+v, want %+v", sha, got, want)
 				}
 			}
@@ -151,7 +151,7 @@ func TestForMRHeadOfMergedResults(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := (Found{ID: 95, SHA: headSHA}); got != want {
+			if want := (Found{ID: 95, SHA: headSHA, Head: headSHA}); got != want {
 				t.Errorf("ForMR(%q) = %+v; want the head pipeline and the full head SHA, %+v", sha, got, want)
 			}
 		})
@@ -163,7 +163,7 @@ func TestForMRWithoutPipelineForTheCommit(t *testing.T) {
 	// No pipeline ran on this commit, and the commit of pipeline 80
 	// cannot be read (404): that is not an error.
 	got, err := ForMR(context.Background(), f.client(t), testMR, "dddd3333")
-	if want := (Found{SHA: "dddd3333"}); err != nil || got != want {
+	if want := (Found{SHA: "dddd3333", Head: headSHA}); err != nil || got != want {
 		t.Errorf("ForMR = %+v, %v; want %+v and no error", got, err, want)
 	}
 }
@@ -364,17 +364,17 @@ func TestForMRHeadPipelineOnAnUnreadableMergeCommit(t *testing.T) {
 	}
 	for _, sha := range []string{"", headSHA[:8]} {
 		got, err := ForMR(context.Background(), unreadable().client(t), testMR, sha)
-		if want := (Found{SHA: headSHA, Unconfirmed: 95}); err != nil || got != want {
+		if want := (Found{SHA: headSHA, Unconfirmed: 95, Head: headSHA}); err != nil || got != want {
 			t.Errorf("ForMR(%q) = %+v, %v; want %+v", sha, got, err, want)
 		}
 	}
 	// An older commit: the head pipeline is not a candidate for it.
 	got, err := ForMR(context.Background(), unreadable().client(t), testMR, oldSHA)
-	if want := (Found{ID: 93, SHA: oldSHA}); err != nil || got != want {
+	if want := (Found{ID: 93, SHA: oldSHA, Head: headSHA}); err != nil || got != want {
 		t.Errorf("ForMR(old) = %+v, %v; want %+v", got, err, want)
 	}
 	got, err = ForMR(context.Background(), unreadable().client(t), testMR, "dddd3333")
-	if want := (Found{SHA: "dddd3333"}); err != nil || got != want {
+	if want := (Found{SHA: "dddd3333", Head: headSHA}); err != nil || got != want {
 		t.Errorf("ForMR(unknown) = %+v, %v; want %+v", got, err, want)
 	}
 }
@@ -457,7 +457,7 @@ func TestForMRHeadPipelineNotSetYet(t *testing.T) {
 			{"id":90,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"failed"}]`),
 	}}
 	got, err := ForMR(context.Background(), f.client(t), testMR, "")
-	if want := (Found{ID: 95, SHA: headSHA}); err != nil || got != want {
+	if want := (Found{ID: 95, SHA: headSHA, Head: headSHA}); err != nil || got != want {
 		t.Errorf("ForMR = %+v, %v; want %+v", got, err, want)
 	}
 }

@@ -863,3 +863,74 @@ func TestPipelineUnconfirmedHeadPipelineIsWarnedAbout(t *testing.T) {
 		})
 	}
 }
+
+// --sha is the SHA of a commit: anything else is a usage error, before
+// GitLab is asked anything.
+func TestPipelineRejectsWhatIsNotACommitSHA(t *testing.T) {
+	for _, sha := range []string{"f", "abc123", "HEAD", "main", "zzzzzzz", strings.Repeat("a", 41)} {
+		for _, args := range [][]string{
+			{"pipeline", "get", "group/project!1", "--sha", sha},
+			{"pipeline", "wait", "group/project!1", "--interval", "5s", "--sha", sha},
+		} {
+			e := newWaitEnv(t, noPipelineAnswers)
+			if code, _ := e.run(t, args...); code != 2 || !strings.Contains(e.stderr.String(), "--sha") {
+				t.Errorf("%v: exit %d, want 2 and a word about --sha (stderr: %s)", args, code, e.stderr.String())
+			}
+			if n := e.count(waitMR); n != 0 {
+				t.Errorf("%v: GitLab was asked %d times", args, n)
+			}
+		}
+	}
+}
+
+// longSHA is a merge request whose commits have SHAs long enough for
+// --sha: its head pipeline (7) ran on abcdef1234.
+func longSHA(path string) (string, int) {
+	switch path {
+	case waitMR:
+		return `{"iid":1,"project_id":5,"sha":"abcdef1234","head_pipeline":{"id":7,"sha":"abcdef1234","ref":"refs/merge-requests/1/head","status":"success"}}`, 200
+	case waitMR + "/pipelines":
+		return `[{"id":7,"sha":"abcdef1234","ref":"refs/merge-requests/1/head","status":"success"}]`, 200
+	case waitPipeline:
+		return `{"id":7,"sha":"abcdef1234","status":"success","web_url":"https://gitlab.com/group/project/-/pipelines/7"}`, 200
+	case waitPipeline + "/jobs", waitPipeline + "/bridges":
+		return `[]`, 200
+	}
+	return `{"message":"404 Not Found"}`, 404
+}
+
+func TestPipelineShaInUpperCase(t *testing.T) {
+	e := newWaitEnv(t, longSHA)
+	code, out := e.run(t, "pipeline", "get", "group/project!1", "--sha", "ABCDEF1")
+	if id, status, _, _ := printed(t, e, out); code != 0 || id != 7 || status != "success" {
+		t.Errorf("exit %d, want the pipeline 7, got %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
+	}
+}
+
+// A --sha that is not the head and matches no pipeline: the reason is not
+// "this project has no CI".
+func TestPipelineShaThatMatchesNoPipeline(t *testing.T) {
+	for _, args := range [][]string{
+		{"pipeline", "get", "group/project!1", "--sha", "1234567"},
+		{"pipeline", "wait", "group/project!1", "--interval", "5s", "--sha", "1234567", "--create-timeout", "1m"},
+	} {
+		t.Run(args[1], func(t *testing.T) {
+			e := newWaitEnv(t, longSHA)
+			code, out := e.run(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+			}
+			_, _, _, hints := printed(t, e, out)
+			if len(hints) != 1 || !strings.Contains(hints[0], "None of the 20 most recent pipelines of this merge request ran on 1234567") ||
+				!strings.Contains(hints[0], "abcdef1234") || strings.Contains(hints[0], "skip ci") {
+				t.Errorf("want a hint about the commit, with the head, and not about CI, got %s", e.stdout.String())
+			}
+			if string(out["sha"]) != `"1234567"` || string(out["failed_jobs"]) != "[]" {
+				t.Errorf("want the sha and an empty failed_jobs, got %s", e.stdout.String())
+			}
+			if args[1] == "wait" && string(out["no_pipeline"]) != "true" {
+				t.Errorf("want no_pipeline, got %s", e.stdout.String())
+			}
+		})
+	}
+}
