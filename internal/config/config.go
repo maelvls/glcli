@@ -271,9 +271,20 @@ func (c *Config) Host(name string) (Host, error) {
 	}
 	if h.Token == "" {
 		known := c.Names()
-		return h, fmt.Errorf("no token for %s in %s (hosts there: %s): run `glab auth login --hostname %s`", name, c.Path, strings.Join(known, ", "), name)
+		return h, fmt.Errorf("no token for %s in %s (hosts there: %s): run %s", name, c.Path, strings.Join(known, ", "), LoginAdvice(name))
 	}
 	return h, nil
+}
+
+// LoginAdvice is the glab command that gives glcli a token for host, for
+// the messages that tell to log in. A plain `glab auth login` is not
+// enough with a current glab: since 1.111.0 it keeps the token in the
+// keyring of the operating system when there is one, where glcli does not
+// read it, so that the user would log in and find glcli failing again.
+// --insecure-storage, new in that version, makes glab write the token to
+// its config file.
+func LoginAdvice(host string) string {
+	return "`glab auth login --hostname " + host + "` (with --insecure-storage if glab is 1.111.0 or later: it then writes the token to its config file, in clear, instead of the keyring, which glcli does not read)"
 }
 
 // noTokenInFile is the error for a host that glab's config has, without a
@@ -289,7 +300,7 @@ func (c *Config) Host(name string) (Host, error) {
 // without a token too.
 func (c *Config) noTokenInFile(h Host) error {
 	why := "the host is there without a token: glab is logged out of it, or keeps its token in the keyring of the operating system, which glcli does not read"
-	login := "run `glab auth login --hostname " + h.Name + "`, with --insecure-storage if glab is 1.111.0 or later (it then writes the token to that file, in clear, instead of the keyring)"
+	login := "run " + LoginAdvice(h.Name)
 	if h.Keyring {
 		why = "glab keeps it in the keyring of the operating system (use_keyring is true for this host), which glcli does not read"
 		login = "run `glab auth login --hostname " + h.Name + " --insecure-storage` (glab 1.111.0 or later), which makes glab write the token to that file, in clear"

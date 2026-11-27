@@ -161,7 +161,7 @@ func TestRejectedTokenIsReadAgainFromTheConfig(t *testing.T) {
 func TestRejectedTokenUnchangedHints(t *testing.T) {
 	oauthAdvice := []string{
 		"glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname gitlab.com`, then the same glcli command again (`mr wait` with the same --cursor misses nothing)",
-		"If glab cannot renew it, run `glab auth login --hostname gitlab.com`",
+		"If glab cannot renew it, run `glab auth login --hostname gitlab.com` (with --insecure-storage if glab is 1.111.0 or later: it then writes the token to its config file, in clear, instead of the keyring, which glcli does not read)\n",
 	}
 	for _, tc := range []struct {
 		name   string
@@ -174,10 +174,10 @@ func TestRejectedTokenUnchangedHints(t *testing.T) {
 		not    []string
 	}{
 		{name: "personal access token", config: patConfig("glpat-SECRET"), sent: "PRIVATE-TOKEN: glpat-SECRET", loads: 2,
-			want: []string{"glcli: the token was rejected: run `glab auth login --hostname gitlab.com` (glcli reads glab's config), or `glcli auth status`\n"},
+			want: []string{"glcli: the token was rejected: run `glab auth login --hostname gitlab.com` (with --insecure-storage if glab is 1.111.0 or later: it then writes the token to its config file, in clear, instead of the keyring, which glcli does not read), or `glcli auth status`\n"},
 			not:  []string{"OAuth", "expire", "glab auth status"}},
 		{name: "personal access token of another host", config: patConfig("glpat-SECRET"), args: []string{"--host", "code.pan.run"}, sent: "PRIVATE-TOKEN: glpat-other-SECRET", loads: 2,
-			want: []string{"glcli: the token was rejected: run `glab auth login --hostname code.pan.run` (glcli reads glab's config), or `glcli auth status`\n"},
+			want: []string{"glcli: the token was rejected: run `glab auth login --hostname code.pan.run` (with --insecure-storage if glab is 1.111.0 or later: it then writes the token to its config file, in clear, instead of the keyring, which glcli does not read), or `glcli auth status`\n"},
 			not:  []string{"OAuth", "expire", "glab auth status"}},
 		{name: "expired OAuth token", config: oauthConfig("oauth-SECRET", past), sent: "Authorization: Bearer oauth-SECRET", loads: 2,
 			want: append([]string{"glcli: the OAuth token of gitlab.com expired at 2020-01-02T03:04:05Z, and glab's config has no newer one. "}, oauthAdvice...)},

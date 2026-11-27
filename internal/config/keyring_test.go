@@ -57,10 +57,12 @@ func TestNoTokenBecauseOfTheKeyring(t *testing.T) {
 			"or set GLCLI_HOST=code.pan.run and GLCLI_TOKEN to a personal access token (GLCLI_TOKEN is only used for the default host, which is gitlab.com)",
 		// No token and no use_keyring: logged out, or an older glab.
 		"out.example.com": "no token for out.example.com in /x/config.yml: the host is there without a token: glab is logged out of it, or keeps its token in the keyring of the operating system, which glcli does not read. " +
-			"Either run `glab auth login --hostname out.example.com`, with --insecure-storage if glab is 1.111.0 or later (it then writes the token to that file, in clear, instead of the keyring), " +
+			"Either run `glab auth login --hostname out.example.com` (with --insecure-storage if glab is 1.111.0 or later: it then writes the token to its config file, in clear, instead of the keyring, which glcli does not read), " +
 			"or set GLCLI_HOST=out.example.com and GLCLI_TOKEN to a personal access token (GLCLI_TOKEN is only used for the default host, which is gitlab.com)",
-		// A host glab's config does not have: as before.
-		"new.example.com": "no token for new.example.com in /x/config.yml (hosts there: both.example.com, code.pan.run, file.example.com, gitlab.com, out.example.com): run `glab auth login --hostname new.example.com`",
+		// A host glab's config does not have: the first thing someone who
+		// never logged in sees. A plain login would put the token in the
+		// keyring of a current glab.
+		"new.example.com": "no token for new.example.com in /x/config.yml (hosts there: both.example.com, code.pan.run, file.example.com, gitlab.com, out.example.com): run `glab auth login --hostname new.example.com` (with --insecure-storage if glab is 1.111.0 or later: it then writes the token to its config file, in clear, instead of the keyring, which glcli does not read)",
 	} {
 		h, err := c.Host(host)
 		if err == nil || err.Error() != want {

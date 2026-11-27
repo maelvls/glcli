@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/maelvls/glcli/internal/cli"
+	"github.com/maelvls/glcli/internal/config"
 	"github.com/maelvls/glcli/internal/gitlab"
 )
 
@@ -145,9 +146,9 @@ func rejectedTokenHint(err error) string {
 		if unread != "" {
 			newer = unread
 		}
-		return what + newer + ". glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname " + host + "`, then the same glcli command again (`mr wait` with the same --cursor misses nothing). If glab cannot renew it, run `glab auth login --hostname " + host + "`"
+		return what + newer + ". glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname " + host + "`, then the same glcli command again (`mr wait` with the same --cursor misses nothing). If glab cannot renew it, run " + config.LoginAdvice(host)
 	}
-	return "the token was rejected" + unread + ": run `glab auth login --hostname " + host + "` (glcli reads glab's config), or `glcli auth status`"
+	return "the token was rejected" + unread + ": run " + config.LoginAdvice(host) + ", or `glcli auth status`"
 }
 
 type usageError struct{ error }

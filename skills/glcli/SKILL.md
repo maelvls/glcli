@@ -9,7 +9,7 @@ Use `glcli` from `$PATH`. If it is missing, tell the user: `go install github.co
 
 `glcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. If a capability named here is absent from the installed help, report version skew instead of guessing.
 
-glcli reads glab's hosts and tokens (`~/.config/glab-cli/config.yml`), whether glab logged in with a token or with OAuth: if a token is missing or rejected, glcli's error on stderr says what the user must run; tell them that. It is `glab auth status --hostname <host>` for an expired OAuth token (glab renews it, glcli never does; then run the same glcli command again), `glab auth login --hostname <host> --insecure-storage` or `GLCLI_TOKEN` for a token that glab keeps in the keyring (glcli does not read it), and `glab auth login --hostname <host>` otherwise. `glcli auth status` lists the hosts without calling GitLab.
+glcli reads glab's hosts and tokens (`~/.config/glab-cli/config.yml`), whether glab logged in with a token or with OAuth: if a token is missing or rejected, glcli's error on stderr says what the user must run; tell them that. It is `glab auth status --hostname <host>` for an expired OAuth token (glab renews it, glcli never does; then run the same glcli command again), `glab auth login --hostname <host> --insecure-storage` or `GLCLI_TOKEN` for a token that glab keeps in the keyring (glcli does not read it), and `glab auth login --hostname <host>` otherwise, with `--insecure-storage` if glab is 1.111.0 or later (without it, such a glab puts the token in the keyring and glcli fails again). `glcli auth status` lists the hosts without calling GitLab.
 
 ## Safety
 

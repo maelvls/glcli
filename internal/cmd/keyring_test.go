@@ -86,3 +86,28 @@ func TestKeyringHostWithEnvToken(t *testing.T) {
 		t.Errorf("got %s", got)
 	}
 }
+
+// What someone who never logged in sees first: the host is not in glab's
+// config, or there is no config at all. A plain `glab auth login` would
+// put the token in the keyring of a current glab, and glcli would fail
+// again: the message says how to log in so that glcli finds the token.
+func TestUnknownHostSaysHowToLogIn(t *testing.T) {
+	const advice = " (with --insecure-storage if glab is 1.111.0 or later: it then writes the token to its config file, in clear, instead of the keyring, which glcli does not read)\n"
+	rt, _, stderr, path := fakeGitLabOnDisk(t, noRequest(t), keyringConfig)
+	if code := run(rt, []string{"auth", "test", "--host", "new.example.com"}); code != 1 {
+		t.Fatalf("exit %d, want 1 (stderr: %s)", code, stderr.String())
+	}
+	if got, want := stderr.String(), "glcli: no token for new.example.com in "+path+" (hosts there: code.pan.run, gitlab.com): run `glab auth login --hostname new.example.com`"+advice; got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+
+	// No config.yml at all.
+	rt, _, stderr, _ = fakeGitLabOnDisk(t, noRequest(t), "")
+	t.Setenv("GLAB_CONFIG_DIR", t.TempDir())
+	if code := run(rt, []string{"auth", "test"}); code != 1 {
+		t.Fatalf("exit %d, want 1 (stderr: %s)", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.HasPrefix(got, "glcli: no token for gitlab.com in ") || !strings.HasSuffix(got, " (hosts there: ): run `glab auth login --hostname gitlab.com`"+advice) {
+		t.Errorf("got %s", got)
+	}
+}
