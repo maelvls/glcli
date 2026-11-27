@@ -115,7 +115,14 @@ func (e *waitEnv) count(path string) int {
 // its exit code and the JSON it printed.
 func (e *waitEnv) wait(t *testing.T, args ...string) (code int, out map[string]json.RawMessage) {
 	t.Helper()
-	code = run(e.rt, append([]string{"pipeline", "wait", "group/project!1", "--interval", "5s"}, args...))
+	return e.run(t, append([]string{"pipeline", "wait", "group/project!1", "--interval", "5s"}, args...)...)
+}
+
+// run runs glcli with args and returns its exit code and the JSON it
+// printed.
+func (e *waitEnv) run(t *testing.T, args ...string) (code int, out map[string]json.RawMessage) {
+	t.Helper()
+	code = run(e.rt, args)
 	if e.stdout.Len() > 0 {
 		if err := json.Unmarshal(e.stdout.Bytes(), &out); err != nil {
 			t.Fatalf("%v: %s", err, e.stdout.String())
@@ -400,4 +407,36 @@ func TestPipelineWaitFinishedAtTheTimeout(t *testing.T) {
 		t.Errorf("want a finished pipeline, no timed_out and no hint, got %s", e.stdout.String())
 	}
 	checkFailedJobs(t, e, out)
+}
+
+// A log that cannot be read is said in "warnings", by "pipeline get" and
+// by "pipeline wait".
+func TestPipelineWarnsAboutALogItCannotRead(t *testing.T) {
+	for _, args := range [][]string{
+		{"pipeline", "get", "group/project!1"},
+		{"pipeline", "wait", "group/project!1", "--interval", "5s"},
+	} {
+		t.Run(args[1], func(t *testing.T) {
+			answers := onePipeline(func() string { return "failed" })
+			e := newWaitEnv(t, func(path string) (string, int) {
+				if strings.HasSuffix(path, "/trace") {
+					return `{"message":"403 Forbidden"}`, 403
+				}
+				return answers(path)
+			})
+			code, out := e.run(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+			}
+			var warnings []string
+			if err := json.Unmarshal(out["warnings"], &warnings); err != nil || len(warnings) != 1 ||
+				!strings.Contains(warnings[0], `"test" (70, in group/project)`) || !strings.Contains(warnings[0], "HTTP 403") {
+				t.Errorf("want one warning with the job and the reason, got %s", e.stdout.String())
+			}
+			var jobs []map[string]json.RawMessage
+			if err := json.Unmarshal(out["failed_jobs"], &jobs); err != nil || len(jobs) != 1 || jobs[0]["log"] != nil {
+				t.Errorf("want the failed job, without log, got %s", e.stdout.String())
+			}
+		})
+	}
 }

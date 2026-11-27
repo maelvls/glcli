@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -59,6 +60,9 @@ type Report struct {
 	// Truncated is true when a pipeline had more failed jobs (1000) or
 	// trigger jobs (500) than were read: failed jobs may be missing.
 	Truncated bool `json:"truncated,omitempty"`
+	// Warnings say what could not be read, such as the log of a failed
+	// job. They are for the caller to print: not part of the JSON.
+	Warnings []string `json:"-"`
 }
 
 // Options tune the report.
@@ -85,7 +89,7 @@ func Collect(ctx context.Context, c *gitlab.Client, project string, id int, o Op
 	}
 	r.Running = r.Running || !mr.Finished(p.Status)
 	if o.LogLines > 0 {
-		addLogs(ctx, c, r.FailedJobs, o.LogLines)
+		r.Warnings = append(r.Warnings, addLogs(ctx, c, r.FailedJobs, o.LogLines)...)
 	}
 	return r, nil
 }
@@ -232,9 +236,15 @@ func cleanLines(raw string) []string {
 	return out
 }
 
-func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int) {
+// addLogs reads the end of the log of each job, four at a time. A log
+// that cannot be read (a downstream project the token cannot read, an
+// erased job, a log too long to download in time) leaves the job without
+// "log": it returns one warning for each, in the order of the jobs.
+func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int) (warnings []string) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	// Each goroutine writes its own element of jobs and errs.
+	errs := make([]error, len(jobs))
 	for i := range jobs {
 		wg.Add(1)
 		go func() {
@@ -243,12 +253,20 @@ func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int)
 			defer func() { <-sem }()
 			// Lines are rarely longer than 300 bytes; read a generous tail.
 			raw, err := c.GetText(ctx, gitlab.Project(jobs[i].Project)+"/jobs/"+strconv.Itoa(jobs[i].ID)+"/trace", int64(lines)*400+32*1024)
-			if err == nil {
-				jobs[i].Log = CleanLog(raw, lines)
+			if err != nil {
+				errs[i] = err
+				return
 			}
+			jobs[i].Log = CleanLog(raw, lines)
 		}()
 	}
 	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("the log of the failed job %q (%d, in %s) could not be read: %v", jobs[i].Name, jobs[i].ID, jobs[i].Project, err))
+		}
+	}
+	return warnings
 }
 
 // ForMR finds the pipeline of a merge request for the commit sha (full or

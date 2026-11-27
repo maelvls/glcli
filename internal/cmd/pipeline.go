@@ -114,6 +114,15 @@ type pipelineResult struct {
 // for the hints of "pipeline get" and "pipeline wait".
 const noPipelineCauses = "the project has no CI configuration, the push skipped CI ([skip ci] in the commit message, or the ci.skip push option), or the rules of .gitlab-ci.yml (rules, workflow:rules) create no pipeline for this change"
 
+// printPipeline prints a report, with what it could not read (the log of
+// a failed job) in "warnings".
+func printPipeline(rt *cli.Runtime, res pipelineResult) error {
+	for _, w := range res.Warnings {
+		rt.Warnf("%s", w)
+	}
+	return rt.Print(res, "failed_jobs")
+}
+
 func newPipelineGet(rt *cli.Runtime) *cobra.Command {
 	var f pipelineFlags
 	cmd := &cobra.Command{
@@ -149,7 +158,7 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 			if err != nil {
 				return err
 			}
-			return rt.Print(pipelineResult{Report: r}, "failed_jobs")
+			return printPipeline(rt, pipelineResult{Report: r})
 		},
 	}
 	addPipelineFlags(cmd, &f)
@@ -284,7 +293,7 @@ pipeline), 1 on error, 130 when interrupted.`,
 			if timedOut {
 				rt.Hintf("The pipeline was still running after %s: run the same command again to keep waiting.", w.timeout)
 			}
-			return rt.Print(pipelineResult{Report: last, TimedOut: timedOut}, "failed_jobs")
+			return printPipeline(rt, pipelineResult{Report: last, TimedOut: timedOut})
 		},
 	}
 	addPipelineFlags(cmd, &f)

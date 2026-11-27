@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -307,5 +308,48 @@ func TestCollectStatusOnlyReadsNoJobs(t *testing.T) {
 	}
 	if n := f.total(); n != 4 {
 		t.Errorf("%d requests, want 4: the pipeline, and the trigger jobs of the 3 pipelines", n)
+	}
+}
+
+// The logs are read in parallel: this test is also there for the race
+// detector.
+func TestCollectWarnsAboutLogsItCannotRead(t *testing.T) {
+	f := tree("failed")
+	f.routes["projects/group/project/jobs/2/trace"] = ok("$ make test\nFAIL: TestX\n")
+	// No log for job 3 (lint): a 404, as for an erased job.
+	// The token cannot read the jobs of the downstream project.
+	f.routes["projects/group/e2e/jobs/20/trace"] = func(url.Values) (int, string) { return 403, `{"message":"403 Forbidden"}` }
+	r, err := Collect(context.Background(), f.client(t), "group/project", 100, Options{Downstream: true, MaxDepth: 4, IncludeAllowed: true, LogLines: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.FailedJobs) != 3 {
+		t.Fatalf("want test, lint and e2e-1, got %+v", r.FailedJobs)
+	}
+	if got := r.FailedJobs[0].Log; got != "$ make test\nFAIL: TestX" {
+		t.Errorf("log of test: %q", got)
+	}
+	if r.FailedJobs[1].Log != "" || r.FailedJobs[2].Log != "" {
+		t.Errorf("want no log for lint and e2e-1, got %+v", r.FailedJobs)
+	}
+	// One warning for each, in the order of the jobs, with the job and
+	// the reason.
+	if len(r.Warnings) != 2 ||
+		!strings.Contains(r.Warnings[0], `"lint" (3, in group/project)`) || !strings.Contains(r.Warnings[0], "HTTP 404") ||
+		!strings.Contains(r.Warnings[1], `"e2e-1" (20, in group/e2e)`) || !strings.Contains(r.Warnings[1], "HTTP 403") {
+		t.Errorf("warnings: %q", r.Warnings)
+	}
+	// The command prints them; they are not in the report's own JSON.
+	if b, err := json.Marshal(r); err != nil || strings.Contains(strings.ToLower(string(b)), "warnings") {
+		t.Errorf("the report's JSON must not have the warnings: %s, %v", b, err)
+	}
+}
+
+func TestCollectWithoutLogsHasNoWarnings(t *testing.T) {
+	f := tree("failed")
+	// No route for the logs: asking for one would be a 404 and a warning.
+	r, err := Collect(context.Background(), f.client(t), "group/project", 100, Options{Downstream: true, MaxDepth: 4})
+	if err != nil || len(r.Warnings) != 0 {
+		t.Errorf("want no warnings, got %q, %v", r.Warnings, err)
 	}
 }
