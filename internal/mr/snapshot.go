@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/maelvls/glcli/internal/gitlab"
@@ -76,25 +77,39 @@ func Fetch(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, error) {
 // change.
 var mergeParents sync.Map
 
+// PipelineIsHead reports whether the head pipeline of m ran on its head
+// commit (see PipelineOnCommit).
 func PipelineIsHead(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest) (bool, error) {
-	hp := m.HeadPipeline
-	if hp == nil {
+	if m.HeadPipeline == nil {
 		return false, nil
 	}
-	if hp.SHA == m.SHA {
+	return PipelineOnCommit(ctx, c, m, *m.HeadPipeline, m.SHA)
+}
+
+// PipelineOnCommit reports whether the pipeline p of the merge request m
+// ran on the commit sha (full or abbreviated): on that commit itself, or
+// on a merged-results or merge-train commit of it. The SHA of such a
+// pipeline (ref refs/merge-requests/<iid>/merge or /train) is a temporary
+// merge commit, which has the commit among its parents: reading them
+// costs one request per pipeline, once.
+func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest, p gitlab.PipelineRef, sha string) (bool, error) {
+	if sha == "" {
+		return false, nil
+	}
+	if strings.HasPrefix(p.SHA, sha) {
 		return true, nil
 	}
 	prefix := "refs/merge-requests/" + strconv.Itoa(m.IID) + "/"
-	if hp.Ref != prefix+"merge" && hp.Ref != prefix+"train" {
+	if p.Ref != prefix+"merge" && p.Ref != prefix+"train" {
 		return false, nil
 	}
-	key := c.Host.Name + "/" + strconv.Itoa(m.ProjectID) + "/" + hp.SHA
+	key := c.Host.Name + "/" + strconv.Itoa(m.ProjectID) + "/" + p.SHA
 	parents, ok := mergeParents.Load(key)
 	if !ok {
 		var commit struct {
 			ParentIDs []string `json:"parent_ids"`
 		}
-		err := c.Get(ctx, "projects/"+strconv.Itoa(m.ProjectID)+"/repository/commits/"+hp.SHA, nil, &commit)
+		err := c.Get(ctx, "projects/"+strconv.Itoa(m.ProjectID)+"/repository/commits/"+p.SHA, nil, &commit)
 		if gitlab.IsStatus(err, 404) {
 			return false, nil
 		}
@@ -104,7 +119,7 @@ func PipelineIsHead(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest
 		parents = commit.ParentIDs
 		mergeParents.Store(key, parents)
 	}
-	return slices.Contains(parents.([]string), m.SHA), nil
+	return slices.ContainsFunc(parents.([]string), func(parent string) bool { return strings.HasPrefix(parent, sha) }), nil
 }
 
 func fetchOnce(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, error) {

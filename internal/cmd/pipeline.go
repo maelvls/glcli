@@ -43,7 +43,7 @@ type pipelineFlags struct {
 }
 
 func addPipelineFlags(cmd *cobra.Command, f *pipelineFlags) {
-	cmd.Flags().StringVar(&f.sha, "sha", "", "For a merge request: the pipeline of this commit (default: the head commit)")
+	cmd.Flags().StringVar(&f.sha, "sha", "", "For a merge request: the pipeline of this commit, a full or abbreviated SHA (default: the head commit)")
 	cmd.Flags().IntVar(&f.logLines, "log-lines", 40, "Lines of log to print for each failed job (0: none)")
 	cmd.Flags().BoolVar(&f.includeAllowed, "include-allowed", false, "Also list failed jobs that are allowed to fail")
 	cmd.Flags().BoolVar(&f.noDownstream, "no-downstream", false, "Do not follow trigger jobs into downstream pipelines")

@@ -234,11 +234,13 @@ func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int)
 	wg.Wait()
 }
 
-// ForMR finds the pipeline of a merge request for sha (its head when
-// empty): the head pipeline when it ran on that commit or on a
-// merged-results or merge-train commit of it, else the newest pipeline of
-// the merge request on that commit. It returns 0 when GitLab has not
-// created it yet.
+// ForMR finds the pipeline of a merge request for the commit sha (full or
+// abbreviated; the head commit when empty): the head pipeline when it ran
+// on that commit, else the newest of the last 20 pipelines of the merge
+// request that did. A merged-results or merge-train pipeline runs on a
+// temporary merge commit of the commit (see mr.PipelineOnCommit). It
+// returns 0 when there is none: GitLab has not created it yet, or never
+// will.
 func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (id int, headSHA string, err error) {
 	var m gitlab.MergeRequest
 	if err := c.Get(ctx, mr.Base(r), nil, &m); err != nil {
@@ -246,16 +248,15 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (id int,
 	}
 	if sha == "" || strings.HasPrefix(m.SHA, sha) {
 		sha = m.SHA
-		isHead, err := mr.PipelineIsHead(ctx, c, m)
+	}
+	if hp := m.HeadPipeline; hp != nil {
+		on, err := mr.PipelineOnCommit(ctx, c, m, *hp, sha)
 		if err != nil {
 			return 0, sha, err
 		}
-		if isHead {
-			return m.HeadPipeline.ID, sha, nil
+		if on {
+			return hp.ID, sha, nil
 		}
-	}
-	if hp := m.HeadPipeline; hp != nil && strings.HasPrefix(hp.SHA, sha) {
-		return hp.ID, sha, nil
 	}
 	var list []gitlab.PipelineRef
 	if err := c.Get(ctx, mr.Base(r)+"/pipelines", url.Values{"per_page": {"20"}}, &list); err != nil {
@@ -263,7 +264,16 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (id int,
 	}
 	best := 0
 	for _, p := range list {
-		if strings.HasPrefix(p.SHA, sha) && p.ID > best {
+		// GitLab lists the newest first: the pipelines older than one
+		// that matches are not looked at, which spares their commits.
+		if p.ID <= best {
+			continue
+		}
+		on, err := mr.PipelineOnCommit(ctx, c, m, p, sha)
+		if err != nil {
+			return 0, sha, err
+		}
+		if on {
 			best = p.ID
 		}
 	}
