@@ -20,7 +20,8 @@ type Event struct {
 	At   *time.Time `json:"at,omitempty"`
 	// By is who did it, when known.
 	By string `json:"by,omitempty"`
-	// Mine is true when I did it (my push, my approval, my resolve).
+	// Mine is true when I did it (my push, my approval, my resolve, my
+	// merge, my close).
 	Mine bool `json:"mine,omitempty"`
 
 	// push
@@ -235,15 +236,20 @@ func (d *Differ) Events(ctx context.Context, prev Cursor, s *Snapshot) ([]Event,
 		}
 	}
 
-	// State: merged, closed, reopened.
+	// State: merged, closed, reopened. The merge request does not say who
+	// reopened it, so a reopen has no "by".
 	if m.State != prev.State {
 		e := Event{Kind: "state", State: m.State, PreviousState: prev.State}
-		switch {
-		case m.State == "merged" && m.MergedBy != nil:
-			e.By, e.Mine, e.At = m.MergedBy.Username, m.MergedBy.Username == d.People.Me, m.MergedAt
+		var by *gitlab.User
+		switch m.State {
+		case "merged":
+			by, e.At = m.Merger(), m.MergedAt
 			e.SHA = firstNonEmpty(m.SquashCommitSHA, m.MergeCommitSHA)
-		case m.State == "closed":
-			e.At = m.ClosedAt
+		case "closed":
+			by, e.At = m.ClosedBy, m.ClosedAt
+		}
+		if by != nil {
+			e.By, e.Mine = by.Username, by.Username == d.People.Me
 		}
 		events = append(events, e)
 	}

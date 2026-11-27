@@ -61,8 +61,20 @@ type MergeRequest struct {
 	UpdatedAt             time.Time             `json:"updated_at"`
 	MergedAt              *time.Time            `json:"merged_at"`
 	ClosedAt              *time.Time            `json:"closed_at"`
+	MergeUser             *User                 `json:"merge_user"`
 	MergedBy              *User                 `json:"merged_by"`
+	ClosedBy              *User                 `json:"closed_by"`
 	BlockingDiscussionsOK bool                  `json:"blocking_discussions_resolved"`
+}
+
+// Merger is who merged m: merge_user, or merged_by (deprecated since GitLab
+// 14.7) when the instance does not send merge_user. On a merge request that
+// is still open, it is who set auto-merge. Nil when GitLab names nobody.
+func (m *MergeRequest) Merger() *User {
+	if m.MergeUser != nil {
+		return m.MergeUser
+	}
+	return m.MergedBy
 }
 
 // Approvals is GET /projects/:id/merge_requests/:iid/approvals.
