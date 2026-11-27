@@ -380,9 +380,11 @@ func (d *Differ) hash(ctx context.Context, projectID int, base, head string) (pa
 	if h, ok := d.hashes[key]; ok {
 		return h, nil
 	}
+	// A pointer: an answer without "diffs" is not an answer without
+	// changes.
 	var cmp struct {
-		Diffs          []gitlab.VersionDiff `json:"diffs"`
-		CompareTimeout bool                 `json:"compare_timeout"`
+		Diffs          *[]gitlab.VersionDiff `json:"diffs"`
+		CompareTimeout bool                  `json:"compare_timeout"`
 	}
 	q := url.Values{"from": {base}, "to": {head}, "straight": {"true"}}
 	if err := d.Client.Get(ctx, "projects/"+strconv.Itoa(projectID)+"/repository/compare", q, &cmp); err != nil {
@@ -392,8 +394,8 @@ func (d *Differ) hash(ctx context.Context, projectID int, base, head string) (pa
 		return patchHash{}, err
 	}
 	h := patchHash{}
-	if !cmp.CompareTimeout {
-		h.sum, h.known = PatchID(cmp.Diffs)
+	if cmp.Diffs != nil && !cmp.CompareTimeout {
+		h.sum, h.known = PatchID(*cmp.Diffs)
 	}
 	if d.hashes == nil {
 		d.hashes = map[string]patchHash{}

@@ -130,10 +130,14 @@ type Version struct {
 	PatchIDSHA string `json:"patch_id_sha"`
 }
 
-// VersionDiff is one file of a version.
+// VersionDiff is one file of a version, or of a comparison.
 type VersionDiff struct {
-	OldPath     string `json:"old_path"`
-	NewPath     string `json:"new_path"`
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+	// AMode and BMode are the modes of the file before and after, in
+	// octal: "100644", "100755", and "0" on the side where it is absent.
+	AMode       string `json:"a_mode"`
+	BMode       string `json:"b_mode"`
 	Diff        string `json:"diff"`
 	NewFile     bool   `json:"new_file"`
 	RenamedFile bool   `json:"renamed_file"`

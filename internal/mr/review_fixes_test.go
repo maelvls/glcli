@@ -22,10 +22,10 @@ func TestPatchIDSeesRealChanges(t *testing.T) {
 	if a == b {
 		t.Error("indentation changes must change the patch ID")
 	}
-	// Trailing whitespace alone is not.
+	// Trailing whitespace is one too (a Markdown line break).
 	c, _ := id(t, f("@@ -1 +1 @@\n-a:\n+  b: 1   \n"))
-	if a != c {
-		t.Error("trailing whitespace must not change the patch ID")
+	if a == c {
+		t.Error("trailing whitespace must change the patch ID")
 	}
 	// Lines starting with -- or ++ are changes (GitLab diffs have no ---/+++ headers).
 	d, _ := id(t, f("@@ -1 +0,0 @@\n-- a\n"))
