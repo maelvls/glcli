@@ -49,12 +49,8 @@ func addPipelineFlags(cmd *cobra.Command, f *pipelineFlags) {
 	cmd.Flags().BoolVar(&f.noDownstream, "no-downstream", false, "Do not follow trigger jobs into downstream pipelines")
 }
 
-func (f pipelineFlags) options(logs bool) pipeline.Options {
-	o := pipeline.Options{IncludeAllowed: f.includeAllowed, Downstream: !f.noDownstream, MaxDepth: 4}
-	if logs {
-		o.LogLines = f.logLines
-	}
-	return o
+func (f pipelineFlags) options() pipeline.Options {
+	return pipeline.Options{LogLines: f.logLines, IncludeAllowed: f.includeAllowed, Downstream: !f.noDownstream, MaxDepth: 4}
 }
 
 // pipelineTarget resolves the argument to a project and a pipeline ID
@@ -149,7 +145,7 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 				rt.Hintf("No pipeline for %s: GitLab may still be creating it (it takes a few seconds after a push), or this commit will never have one (%s). `glcli pipeline wait` waits for it, and prints \"no_pipeline\": true when none is created.", t.sha, noPipelineCauses)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha}, "failed_jobs")
 			}
-			r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options(true))
+			r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options())
 			if err != nil {
 				return err
 			}
@@ -209,6 +205,10 @@ pipeline), 1 on error, 130 when interrupted.`,
 			if err != nil {
 				return err
 			}
+			// While the pipelines run, a poll reads their statuses and no
+			// jobs: the failed jobs and their logs are read once, at the end.
+			statusOnly := f.options()
+			statusOnly.StatusOnly = true
 			var (
 				last   *pipeline.Report
 				lastID int
@@ -245,11 +245,19 @@ pipeline), 1 on error, 130 when interrupted.`,
 					rt.Notef("now waiting for pipeline %d (new head %s)", t.id, t.sha)
 				}
 				lastID = t.id
-				r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options(false))
+				r, err := pipeline.Collect(ctx, t.client, t.project, t.id, statusOnly)
 				if err != nil {
 					return false, err
 				}
 				last = r
+				if r.Running {
+					return false, nil
+				}
+				if r, err = pipeline.Collect(ctx, t.client, t.project, t.id, f.options()); err != nil {
+					return false, err
+				}
+				last = r
+				// A job retried in between has the pipeline running again.
 				return !r.Running, nil
 			})
 			if err != nil {
@@ -263,11 +271,15 @@ pipeline), 1 on error, 130 when interrupted.`,
 				rt.Hintf("No pipeline was created for %s within %s (--timeout): run the same command again to keep waiting for it.", t.sha, w.timeout)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha, TimedOut: true}, "failed_jobs")
 			}
-			if !timedOut && f.logLines > 0 && len(last.FailedJobs) > 0 {
-				// Fetch once more with logs, now that it has finished.
-				if r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options(true)); err == nil {
+			if timedOut {
+				// The current state, with the jobs that have failed so far.
+				if r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options()); err != nil {
+					rt.Warnf("the failed jobs could not be read: %v", err)
+				} else {
 					last = r
 				}
+				// It may have finished just now.
+				timedOut = last.Running
 			}
 			if timedOut {
 				rt.Hintf("The pipeline was still running after %s: run the same command again to keep waiting.", w.timeout)

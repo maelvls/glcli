@@ -285,3 +285,119 @@ func TestPipelineWaitWaitsForASlowPipeline(t *testing.T) {
 		t.Errorf("want a finished pipeline and no no_pipeline, got %s", e.stdout.String())
 	}
 }
+
+const waitPipeline = "projects/group/project/pipelines/7"
+
+// onePipeline is a merge request whose head pipeline (7, no downstream
+// pipeline) has one failed job, "test", with a log. status is asked each
+// time the pipeline is read.
+func onePipeline(status func() string) func(path string) (string, int) {
+	return func(path string) (string, int) {
+		switch path {
+		case waitMR:
+			return `{"iid":1,"project_id":5,"sha":"aaa111","head_pipeline":{"id":7,"sha":"aaa111","ref":"refs/merge-requests/1/head","status":"running"}}`, 200
+		case waitPipeline:
+			return `{"id":7,"sha":"aaa111","status":"` + status() + `","web_url":"https://gitlab.com/group/project/-/pipelines/7"}`, 200
+		case waitPipeline + "/jobs":
+			return `[{"id":70,"name":"test","stage":"test","status":"failed"}]`, 200
+		case waitPipeline + "/bridges":
+			return `[]`, 200
+		case "projects/group/project/jobs/70/trace":
+			return "$ make test\nFAIL: TestX\n", 200
+		}
+		return `{"message":"404 Not Found"}`, 404
+	}
+}
+
+// checkFailedJobs checks that the result has the failed job with its log,
+// and that the jobs were asked for once, failed ones only.
+func checkFailedJobs(t *testing.T, e *waitEnv, out map[string]json.RawMessage) {
+	t.Helper()
+	var jobs []struct {
+		Name string `json:"name"`
+		Log  string `json:"log"`
+	}
+	if err := json.Unmarshal(out["failed_jobs"], &jobs); err != nil || len(jobs) != 1 || jobs[0].Name != "test" || !strings.Contains(jobs[0].Log, "FAIL: TestX") {
+		t.Errorf("want the failed job with its log, got %s", e.stdout.String())
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	asked := e.queries[waitPipeline+"/jobs"]
+	if len(asked) != 1 {
+		t.Fatalf("the jobs were asked for %d times, want once, at the end", len(asked))
+	}
+	if scope := asked[0]["scope[]"]; len(scope) != 1 || scope[0] != "failed" {
+		t.Errorf("want scope[]=failed, got %s", asked[0].Encode())
+	}
+}
+
+// While the pipeline runs, the polls read no jobs; when it has finished,
+// the failed jobs and their logs are read once.
+func TestPipelineWaitReadsJobsOnceAtTheEnd(t *testing.T) {
+	read := 0
+	e := newWaitEnv(t, onePipeline(func() string {
+		if read++; read <= 3 {
+			return "running"
+		}
+		return "failed"
+	}))
+	code, out := e.wait(t)
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	var p struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out["pipeline"], &p); err != nil || p.Status != "failed" || string(out["running"]) != "false" {
+		t.Errorf("want a failed pipeline, got %s", e.stdout.String())
+	}
+	if _, ok := out["timed_out"]; ok {
+		t.Errorf("want no timed_out, got %s", e.stdout.String())
+	}
+	if n := e.count(waitPipeline); n < 4 {
+		t.Errorf("the pipeline was read %d times, want at least 4 polls", n)
+	}
+	checkFailedJobs(t, e, out)
+}
+
+// On timeout, the current state is complete: the jobs that have failed so
+// far, with their logs.
+func TestPipelineWaitTimeoutPrintsFailedJobs(t *testing.T) {
+	e := newWaitEnv(t, onePipeline(func() string { return "running" }))
+	code, out := e.wait(t, "--timeout", "2m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	if string(out["timed_out"]) != "true" || string(out["running"]) != "true" || len(out["hints"]) == 0 {
+		t.Errorf("want timed_out, running and a hint, got %s", e.stdout.String())
+	}
+	checkFailedJobs(t, e, out)
+}
+
+// The pipeline finishes between the last poll and the read made on
+// timeout: it is printed as finished, not as timed out.
+func TestPipelineWaitFinishedAtTheTimeout(t *testing.T) {
+	// How many times a wait that times out reads the pipeline: the last
+	// read is the one made on timeout.
+	e := newWaitEnv(t, onePipeline(func() string { return "running" }))
+	if code, out := e.wait(t, "--timeout", "2m"); code != 0 || string(out["timed_out"]) != "true" {
+		t.Fatalf("exit %d, %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
+	}
+	last := e.count(waitPipeline)
+
+	read := 0
+	e = newWaitEnv(t, onePipeline(func() string {
+		if read++; read < last {
+			return "running"
+		}
+		return "failed"
+	}))
+	code, out := e.wait(t, "--timeout", "2m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	if _, ok := out["timed_out"]; ok || string(out["running"]) != "false" || len(out["hints"]) != 0 {
+		t.Errorf("want a finished pipeline, no timed_out and no hint, got %s", e.stdout.String())
+	}
+	checkFailedJobs(t, e, out)
+}

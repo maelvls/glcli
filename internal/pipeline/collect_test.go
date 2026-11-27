@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,17 @@ func (f *fake) asked(path string) []url.Values {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.queries[path]
+}
+
+// total is the number of requests made.
+func (f *fake) total() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, q := range f.queries {
+		n += len(q)
+	}
+	return n
 }
 
 const (
@@ -169,5 +181,131 @@ func TestForMRPipelineOnTheCommitItself(t *testing.T) {
 	id, _, err := ForMR(context.Background(), f.client(t), testMR, oldSHA[:8])
 	if err != nil || id != 90 {
 		t.Errorf("ForMR = %d, %v; want pipeline 90", id, err)
+	}
+}
+
+// fakeJob is a job of the fake GitLab; retried is true for a run that
+// was replaced by a newer run of the same job.
+type fakeJob struct {
+	id           int
+	name, status string
+	allowFailure bool
+	retried      bool
+}
+
+// jobsRoute lists jobs as GitLab does: the latest run of each job unless
+// include_retried, and the statuses of scope[] when given.
+func jobsRoute(jobs ...fakeJob) func(url.Values) (int, string) {
+	return func(q url.Values) (int, string) {
+		var out []string
+		for _, j := range jobs {
+			if j.retried && q.Get("include_retried") != "true" {
+				continue
+			}
+			if scope := q["scope[]"]; len(scope) > 0 && !slices.Contains(scope, j.status) {
+				continue
+			}
+			out = append(out, fmt.Sprintf(`{"id":%d,"name":%q,"stage":"test","status":%q,"allow_failure":%t}`, j.id, j.name, j.status, j.allowFailure))
+		}
+		return 200, "[" + strings.Join(out, ",") + "]"
+	}
+}
+
+// tree is a pipeline (100, failed) with two downstream pipelines: 200 in
+// another project (status given) and 300 in the same project (success).
+func tree(status200 string) *fake {
+	const (
+		parent = "projects/group/project/pipelines/100"
+		e2e    = "projects/group/e2e/pipelines/200"
+		deploy = "projects/group/project/pipelines/300"
+	)
+	return &fake{routes: map[string]func(url.Values) (int, string){
+		parent: ok(`{"id":100,"status":"failed","web_url":"https://gitlab.com/group/project/-/pipelines/100"}`),
+		parent + "/jobs": jobsRoute(
+			fakeJob{id: 1, name: "build", status: "success"},
+			fakeJob{id: 2, name: "test", status: "failed"},
+			fakeJob{id: 3, name: "lint", status: "failed", allowFailure: true},
+			// flaky failed, was retried, and passed.
+			fakeJob{id: 4, name: "flaky", status: "failed", retried: true},
+			fakeJob{id: 5, name: "flaky", status: "success"},
+		),
+		parent + "/bridges": ok(`[
+			{"id":10,"name":"e2e","status":"` + status200 + `","downstream_pipeline":{"id":200,"project_id":6,"status":"` + status200 + `","web_url":"https://gitlab.com/group/e2e/-/pipelines/200"}},
+			{"id":11,"name":"deploy","status":"success","downstream_pipeline":{"id":300,"project_id":5,"status":"success","web_url":"https://gitlab.com/group/project/-/pipelines/300"}}]`),
+		e2e + "/jobs":       jobsRoute(fakeJob{id: 20, name: "e2e-1", status: "failed"}, fakeJob{id: 21, name: "e2e-2", status: "success"}),
+		e2e + "/bridges":    ok(`[]`),
+		deploy + "/jobs":    jobsRoute(fakeJob{id: 30, name: "deploy", status: "success"}),
+		deploy + "/bridges": ok(`[]`),
+	}}
+}
+
+var treeJobs = []string{
+	"projects/group/project/pipelines/100/jobs",
+	"projects/group/e2e/pipelines/200/jobs",
+	"projects/group/project/pipelines/300/jobs",
+}
+
+func TestCollectAsksGitLabForFailedJobsOnly(t *testing.T) {
+	f := tree("failed")
+	r, err := Collect(context.Background(), f.client(t), "group/project", 100, Options{Downstream: true, MaxDepth: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range treeJobs {
+		asked := f.asked(path)
+		if len(asked) != 1 {
+			t.Errorf("%s: %d requests, want 1", path, len(asked))
+			continue
+		}
+		q := asked[0]
+		if !slices.Equal(q["scope[]"], []string{"failed"}) {
+			t.Errorf("%s: want scope[]=failed, got %s", path, q.Encode())
+		}
+		if q.Get("include_retried") == "true" {
+			t.Errorf("%s: retried jobs must not be asked for, got %s", path, q.Encode())
+		}
+	}
+	var names []string
+	for _, j := range r.FailedJobs {
+		names = append(names, j.Name+"@"+j.Project)
+	}
+	// Not lint (allowed to fail), not flaky (passed when retried).
+	if want := []string{"test@group/project", "e2e-1@group/e2e"}; !slices.Equal(names, want) {
+		t.Errorf("failed jobs: %v, want %v", names, want)
+	}
+	if r.AllowedFailures != 1 || r.Running || r.Truncated || len(r.Downstream) != 2 {
+		t.Errorf("want 1 allowed failure, finished, 2 downstream pipelines; got %+v", r)
+	}
+}
+
+func TestCollectIncludeAllowed(t *testing.T) {
+	f := tree("failed")
+	r, err := Collect(context.Background(), f.client(t), "group/project", 100, Options{Downstream: true, MaxDepth: 4, IncludeAllowed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.FailedJobs) != 3 || r.AllowedFailures != 0 {
+		t.Errorf("want test, lint and e2e-1, got %+v", r.FailedJobs)
+	}
+}
+
+// What "pipeline wait" asks at each poll: the pipeline and the trigger
+// jobs of each pipeline of the tree, and no jobs.
+func TestCollectStatusOnlyReadsNoJobs(t *testing.T) {
+	f := tree("running")
+	r, err := Collect(context.Background(), f.client(t), "group/project", 100, Options{Downstream: true, MaxDepth: 4, StatusOnly: true, LogLines: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Running || len(r.Downstream) != 2 || len(r.FailedJobs) != 0 {
+		t.Errorf("want a running tree of 2 downstream pipelines and no jobs, got %+v", r)
+	}
+	for _, path := range treeJobs {
+		if n := len(f.asked(path)); n != 0 {
+			t.Errorf("%s: %d requests, want none", path, n)
+		}
+	}
+	if n := f.total(); n != 4 {
+		t.Errorf("%d requests, want 4: the pipeline, and the trigger jobs of the 3 pipelines", n)
 	}
 }

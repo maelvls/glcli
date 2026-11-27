@@ -56,8 +56,8 @@ type Report struct {
 	// AllowedFailures counts the failed jobs left out because they are
 	// allowed to fail (see --include-allowed).
 	AllowedFailures int `json:"allowed_failures,omitempty"`
-	// Truncated is true when a pipeline had more jobs (1000) or trigger
-	// jobs (500) than were read: failed jobs may be missing.
+	// Truncated is true when a pipeline had more failed jobs (1000) or
+	// trigger jobs (500) than were read: failed jobs may be missing.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
@@ -68,6 +68,9 @@ type Options struct {
 	// Downstream follows trigger jobs into downstream pipelines.
 	Downstream bool
 	MaxDepth   int
+	// StatusOnly reads no jobs, only the status of each pipeline: what
+	// "pipeline wait" needs at each poll.
+	StatusOnly bool
 }
 
 // Collect reports on pipeline id of project (a path or numeric ID).
@@ -108,23 +111,10 @@ func projectFromURL(u string) string {
 
 func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, depth int, o Options) error {
 	base := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id)
-	jobs, truncated, err := gitlab.GetAll[gitlab.Job](ctx, c, base+"/jobs", nil, 10)
-	if err != nil {
-		return err
-	}
-	r.Truncated = r.Truncated || truncated
-	for _, j := range jobs {
-		if j.Status != "failed" {
-			continue
+	if !o.StatusOnly {
+		if err := failedJobs(ctx, c, r, project, id, o); err != nil {
+			return err
 		}
-		if j.AllowFailure && !o.IncludeAllowed {
-			r.AllowedFailures++
-			continue
-		}
-		r.FailedJobs = append(r.FailedJobs, FailedJob{
-			ID: j.ID, Name: j.Name, Stage: j.Stage, Status: j.Status, URL: j.WebURL,
-			Pipeline: id, Project: project, FailureReason: j.FailureReason, AllowFailure: j.AllowFailure,
-		})
 	}
 	if !o.Downstream || depth >= o.MaxDepth {
 		return nil
@@ -155,6 +145,33 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, 
 		if err := walk(ctx, c, r, dproject, dp.ID, depth+1, o); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// failedJobs adds the failed jobs of one pipeline to r. GitLab is asked
+// for these only (scope[]=failed): a pipeline can have a thousand jobs. A
+// job that failed and was retried is not among them: without
+// include_retried, GitLab lists the latest run of each job.
+func failedJobs(ctx context.Context, c *gitlab.Client, r *Report, project string, id int, o Options) error {
+	path := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id) + "/jobs"
+	jobs, truncated, err := gitlab.GetAll[gitlab.Job](ctx, c, path, url.Values{"scope[]": {"failed"}}, 10)
+	if err != nil {
+		return err
+	}
+	r.Truncated = r.Truncated || truncated
+	for _, j := range jobs {
+		if j.Status != "failed" {
+			continue
+		}
+		if j.AllowFailure && !o.IncludeAllowed {
+			r.AllowedFailures++
+			continue
+		}
+		r.FailedJobs = append(r.FailedJobs, FailedJob{
+			ID: j.ID, Name: j.Name, Stage: j.Stage, Status: j.Status, URL: j.WebURL,
+			Pipeline: id, Project: project, FailureReason: j.FailureReason, AllowFailure: j.AllowFailure,
+		})
 	}
 	return nil
 }
