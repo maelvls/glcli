@@ -19,7 +19,7 @@ func newMR(rt *cli.Runtime) *cobra.Command {
 		Short: "Read and wait on merge requests",
 	}
 	cmd.AddCommand(newMRGet(rt), newMRWait(rt), newMRDiscussions(rt))
-	return cmd
+	return group(cmd)
 }
 
 // mrContext is what every mr command needs.
