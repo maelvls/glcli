@@ -100,6 +100,13 @@ func TestMyPushAfterARebaseOfSomeoneElse(t *testing.T) {
 		// My approval is gone since the rebase of :06: no push of mine
 		// changes that, nor its date.
 		{
+			name:     "what I saw has no patch ID, a push without a patch ID, then I pushed a commit: in doubt, not seen",
+			versions: []gitlab.Version{version(7, "C"), version(6, ""), version(2, "")},
+			notes:    []gitlab.Note{comment, pushBy(2, "bob", 6), pushBy(3, "me", 7)},
+			want:     []string{"new_commits"}, at: 6,
+			wantOld: []string{"new_commits"}, atOld: 6,
+		},
+		{
 			name:     "approved, a rebase removed my approval",
 			versions: []gitlab.Version{version(6, "A"), opened},
 			notes:    []gitlab.Note{note(1, "me", 3, approvedNote, true), pushBy(2, "bob", 6)},
