@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -81,7 +82,8 @@ func TestPatchIDsTrustedIsBounded(t *testing.T) {
 		_, _ = w.Write([]byte(`{"version": "18.5.1-ee"}`))
 	}))
 	t.Cleanup(srv.Close)
-	c := New(config.Host{Name: "release-hangs", Token: "x"})
+	// A host no test has asked: a version once given is remembered.
+	c := New(config.Host{Name: fmt.Sprintf("release-%d", releaseHosts.Add(1)), Token: "x"})
 	c.BaseURL = srv.URL
 
 	start := time.Now()
