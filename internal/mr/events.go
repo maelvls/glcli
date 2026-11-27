@@ -164,7 +164,7 @@ func (d *Differ) Events(ctx context.Context, prev Cursor, s *Snapshot) ([]Event,
 		}
 		for _, dsc := range s.Discussions {
 			for _, n := range dsc.Notes {
-				if n.ID > prev.MaxNote && n.System && strings.HasPrefix(n.Body, "added ") && strings.Contains(n.Body, "commit") {
+				if n.ID > prev.MaxNote && IsPushNote(n) {
 					e.By, e.Mine = n.Author.Username, n.Author.Username == d.People.Me
 				}
 			}

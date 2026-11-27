@@ -235,7 +235,7 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 	}
 	for _, d := range s.Discussions {
 		for _, n := range d.Notes {
-			if n.Author.Username == me && (!n.System || strings.HasPrefix(n.Body, "approved this merge request") || strings.HasPrefix(n.Body, "added ")) {
+			if n.Author.Username == me && (!n.System || strings.HasPrefix(n.Body, "approved this merge request") || mr.IsPushNote(n)) {
 				a.myLast = later(a.myLast, n.CreatedAt)
 			}
 			if n.System && strings.HasPrefix(n.Body, "approved this merge request") {
