@@ -240,11 +240,13 @@ func (d *Differ) Events(ctx context.Context, prev Cursor, s *Snapshot) ([]Event,
 	}
 
 	// State: merged, closed, reopened. The merge request does not say who
-	// reopened it, so a reopen has no "by".
-	if m.State != prev.State {
-		e := Event{Kind: "state", State: m.State, PreviousState: prev.State}
+	// reopened it, so a reopen has no "by". A merge under way ("locked")
+	// is not a state: see settledState. A cursor of an older glcli may
+	// say "locked".
+	if state, was := settledState(m.State), settledState(prev.State); state != was {
+		e := Event{Kind: "state", State: state, PreviousState: was}
 		var by *gitlab.User
-		switch m.State {
+		switch state {
 		case "merged":
 			by, e.At = m.Merger(), m.MergedAt
 			e.SHA = firstNonEmpty(m.SquashCommitSHA, m.MergeCommitSHA)
