@@ -18,6 +18,14 @@ const (
 	defaultInboxInterval    = 2 * time.Minute
 )
 
+// defaultCreateTimeout is how long "pipeline wait" waits for GitLab to
+// create the pipeline of a commit before saying that there is none.
+// GitLab creates it in a background job: seconds after the push as a
+// rule, a few minutes when its queues are behind. Longer than that, and a
+// commit that will never have a pipeline keeps an agent waiting for
+// nothing.
+const defaultCreateTimeout = 5 * time.Minute
+
 func newPipeline(rt *cli.Runtime) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pipeline",
@@ -100,7 +108,15 @@ type pipelineResult struct {
 	// SHA is the commit whose pipeline was looked for, when there is none yet.
 	SHA      string `json:"sha,omitempty"`
 	TimedOut bool   `json:"timed_out,omitempty"`
+	// NoPipeline is true when "pipeline wait" stopped because GitLab
+	// created no pipeline for SHA within --create-timeout. Never set
+	// together with TimedOut.
+	NoPipeline bool `json:"no_pipeline,omitempty"`
 }
+
+// noPipelineCauses is why a commit of a merge request has no pipeline,
+// for the hints of "pipeline get" and "pipeline wait".
+const noPipelineCauses = "the project has no CI configuration, the push skipped CI ([skip ci] in the commit message, or the ci.skip push option), or the rules of .gitlab-ci.yml (rules, workflow:rules) create no pipeline for this change"
 
 func newPipelineGet(rt *cli.Runtime) *cobra.Command {
 	var f pipelineFlags
@@ -130,7 +146,7 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 				return err
 			}
 			if t.id == 0 {
-				rt.Hintf("No pipeline for %s yet: GitLab may still be creating it; `glcli pipeline wait` waits for it.", t.sha)
+				rt.Hintf("No pipeline for %s: GitLab may still be creating it (it takes a few seconds after a push), or this commit will never have one (%s). `glcli pipeline wait` waits for it, and prints \"no_pipeline\": true when none is created.", t.sha, noPipelineCauses)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha}, "failed_jobs")
 			}
 			r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options(true))
@@ -146,8 +162,9 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 
 func newPipelineWait(rt *cli.Runtime) *cobra.Command {
 	var (
-		f pipelineFlags
-		w waitFlags
+		f             pipelineFlags
+		w             waitFlags
+		createTimeout time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "wait <mr|pipeline-url>",
@@ -161,10 +178,21 @@ commit, following the head when someone pushes during the wait; right
 after a push, while GitLab has not created the pipeline yet, it waits for
 it to appear.
 
+It does not wait for a pipeline that never comes: if GitLab has created
+none within --create-timeout (5m, counted again from each new head
+commit), it stops and prints {sha, no_pipeline: true, running: false,
+failed_jobs: []} without "pipeline". The commit then most likely has no
+pipeline at all: the project has no CI configuration, the push skipped CI
+([skip ci], or the ci.skip push option), or the rules of .gitlab-ci.yml
+create no pipeline for this change. --create-timeout 0 waits for it
+indefinitely.
+
 It polls every --interval (30s), keeps trying while GitLab cannot be
 reached, and has no time limit unless --timeout; on timeout it prints the
-current state with "timed_out": true. Exit codes: 0 (whatever the
-pipeline's status, and on timeout), 1 on error, 130 when interrupted.`,
+current state with "timed_out": true (and never "no_pipeline": whichever
+of --timeout and --create-timeout comes first decides). Exit codes: 0
+(whatever the pipeline's status, on timeout, and when there is no
+pipeline), 1 on error, 130 when interrupted.`,
 		Example: `  glcli pipeline wait !123
   glcli pipeline wait group/project!123 --sha 1a2b3c4 --timeout 1h
   glcli pipeline wait https://gitlab.com/group/project/-/pipelines/456`,
@@ -174,19 +202,45 @@ pipeline's status, and on timeout), 1 on error, 130 when interrupted.`,
 			if err := w.check(); err != nil {
 				return err
 			}
+			if createTimeout < 0 {
+				return usagef("--create-timeout must be positive, got %s", createTimeout)
+			}
 			t, err := openPipeline(rt, args[0])
 			if err != nil {
 				return err
 			}
-			var last *pipeline.Report
-			lastID := 0
+			var (
+				last   *pipeline.Report
+				lastID int
+				// GitLab has had since createSince to create the pipeline
+				// of the commit createSHA.
+				createSHA   string
+				createSince time.Time
+				noPipeline  bool
+			)
 			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
 				if err := t.resolve(ctx, f.sha); err != nil {
 					return false, err
 				}
 				if t.id == 0 {
-					return false, nil
+					// The report of an earlier head says nothing of this commit.
+					last = nil
+					// The wall clock, as in Poll: GitLab kept working while
+					// this machine slept, and it has just answered that
+					// there is still no pipeline.
+					now := rt.Now().Round(0)
+					if createSince.IsZero() || createSHA != t.sha {
+						createSHA, createSince = t.sha, now
+						if createTimeout > 0 {
+							rt.Notef("no pipeline for %s yet: waiting up to %s for GitLab to create it (--create-timeout)", t.sha, createTimeout)
+						} else {
+							rt.Notef("no pipeline for %s yet: waiting for GitLab to create it", t.sha)
+						}
+					}
+					noPipeline = createTimeout > 0 && now.Sub(createSince) >= createTimeout
+					return noPipeline, nil
 				}
+				createSince = time.Time{}
 				if t.id != lastID && lastID != 0 {
 					rt.Notef("now waiting for pipeline %d (new head %s)", t.id, t.sha)
 				}
@@ -201,8 +255,12 @@ pipeline's status, and on timeout), 1 on error, 130 when interrupted.`,
 			if err != nil {
 				return err
 			}
+			if noPipeline {
+				rt.Hintf("GitLab created no pipeline for %s within %s (--create-timeout), so there is nothing to wait for. The likely causes: %s. If a pipeline is still expected, run the same command again, with a longer --create-timeout.", t.sha, createTimeout, noPipelineCauses)
+				return rt.Print(pipelineResult{Report: &pipeline.Report{}, SHA: t.sha, NoPipeline: true}, "failed_jobs")
+			}
 			if last == nil {
-				rt.Hintf("No pipeline was created for %s within %s.", t.sha, w.timeout)
+				rt.Hintf("No pipeline was created for %s within %s (--timeout): run the same command again to keep waiting for it.", t.sha, w.timeout)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha, TimedOut: true}, "failed_jobs")
 			}
 			if !timedOut && f.logLines > 0 && len(last.FailedJobs) > 0 {
@@ -219,5 +277,6 @@ pipeline's status, and on timeout), 1 on error, 130 when interrupted.`,
 	}
 	addPipelineFlags(cmd, &f)
 	addWaitFlags(cmd, &w, defaultPipelineInterval)
+	cmd.Flags().DurationVar(&createTimeout, "create-timeout", defaultCreateTimeout, "For a merge request: how long to wait for GitLab to create the pipeline before printing \"no_pipeline\": true (0: wait until it exists)")
 	return cmd
 }
