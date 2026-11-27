@@ -36,7 +36,8 @@ type Runtime struct {
 
 	mu       sync.Mutex
 	cfg      *config.Config
-	reloads  int // how many times cfg was read again after a rejected token
+	reread   *config.Config // the config as last read again after a rejected token
+	reloads  int            // how many times it was read again
 	clients  map[string]*gitlab.Client
 	me       map[string]string
 	warnings []string
@@ -60,8 +61,11 @@ func New(stdout, stderr io.Writer) *Runtime {
 	}
 }
 
-// Config loads glab's configuration once. (It is read again when GitLab
-// rejects a token that came from it: see renewer.)
+// Config loads glab's configuration once: the hosts, the default host and
+// the users of a command are the ones it started with, however long it
+// runs. (The file is read again when GitLab rejects a token that came from
+// it, to look for the token that replaced it and for nothing else: see
+// renewer.)
 func (r *Runtime) Config() (*config.Config, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -138,8 +142,13 @@ func (n renewer) Generation() int {
 	return n.r.reloads
 }
 
-// Renew returns the host of the config with another token than the
-// rejected one, when the config has one.
+// Renew returns the host with the token that glab's config, read again,
+// has for it, when that is another token than the rejected one.
+//
+// What is read again is kept apart from the config the command started
+// with, and only its tokens are looked at: a default host that changed in
+// the file meanwhile does not send the rest of an "inbox wait" to another
+// instance.
 //
 // The requests of a command go in bursts (mr.Fetch and inbox.Collect send
 // several at once), and a rejected token is rejected for each: the config
@@ -154,9 +163,9 @@ func (n renewer) Renew(rejected config.Host, generation int) (config.Host, bool)
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
 	r.mu.Lock()
-	cfg, reloads := r.cfg, r.reloads
+	reread, reloads := r.reread, r.reloads
 	r.mu.Unlock()
-	if h, ok := otherToken(cfg, rejected); ok {
+	if h, ok := otherToken(reread, rejected); ok {
 		return h, true
 	}
 	if reloads != generation {
@@ -166,7 +175,7 @@ func (n renewer) Renew(rejected config.Host, generation int) (config.Host, bool)
 	r.mu.Lock()
 	r.reloads++
 	if err == nil {
-		r.cfg = fresh
+		r.reread = fresh
 	}
 	r.mu.Unlock()
 	if err != nil {
@@ -177,14 +186,16 @@ func (n renewer) Renew(rejected config.Host, generation int) (config.Host, bool)
 	return otherToken(fresh, rejected)
 }
 
-// otherToken returns the host of cfg that rejected came from, when cfg has
-// another token for it than the rejected one.
+// otherToken returns the host of cfg that rejected came from, when the file
+// has another token for it than the rejected one. The tokens of the
+// environment are not looked at: cfg may name another default host than
+// the config the command started with, and they are for the default host.
 func otherToken(cfg *config.Config, rejected config.Host) (config.Host, bool) {
 	if cfg == nil {
 		return rejected, false
 	}
-	h, err := cfg.Host(rejected.Name)
-	if err != nil || h.Token == rejected.Token || strings.HasPrefix(h.TokenSource, "$") {
+	h, ok := cfg.Hosts[rejected.Name]
+	if !ok || h.Token == "" || h.Token == rejected.Token {
 		return rejected, false
 	}
 	return h, true

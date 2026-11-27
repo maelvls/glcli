@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,8 @@ type reloadRig struct {
 
 	mu       sync.Mutex
 	token    string // the token of the config, as glab would have written it
+	host     string // the default host of the config ("host:")
+	fail     error  // when set, the config cannot be read
 	accept   string
 	rejected int
 	all      chan struct{}
@@ -35,7 +38,7 @@ func newReloadRig(t *testing.T, together int, env map[string]string) *reloadRig 
 	for _, k := range []string{"GLCLI_HOST", "GITLAB_HOST", "GLCLI_TOKEN", "GITLAB_TOKEN", "GLCLI_USER"} {
 		t.Setenv(k, env[k])
 	}
-	rig := &reloadRig{token: "old", accept: "new", all: make(chan struct{})}
+	rig := &reloadRig{token: "old", host: "gitlab.com", accept: "new", all: make(chan struct{})}
 	gl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get("Authorization")
 		if got == "" {
@@ -68,8 +71,12 @@ func newReloadRig(t *testing.T, together int, env map[string]string) *reloadRig 
 		rig.loads.Add(1)
 		rig.mu.Lock()
 		defer rig.mu.Unlock()
-		return &config.Config{Path: "config.yml", DefaultHost: "gitlab.com", Hosts: map[string]config.Host{
-			"gitlab.com": {Name: "gitlab.com", APIHost: "gitlab.com", Protocol: "https", Token: rig.token, User: "me", TokenSource: "config.yml", OAuth: true},
+		if rig.fail != nil {
+			return nil, rig.fail
+		}
+		return &config.Config{Path: "config.yml", DefaultHost: rig.host, Hosts: map[string]config.Host{
+			"gitlab.com":   {Name: "gitlab.com", APIHost: "gitlab.com", Protocol: "https", Token: rig.token, User: "me", TokenSource: "config.yml", OAuth: true},
+			"code.pan.run": {Name: "code.pan.run", APIHost: "code.pan.run", Protocol: "https", Token: "other", User: "me", TokenSource: "config.yml"},
 		}}, nil
 	}
 	rig.rt.NewClient = func(h config.Host) *gitlab.Client {
@@ -188,5 +195,100 @@ func TestEnvTokenIsNotReloaded(t *testing.T) {
 	}
 	if got := rig.loads.Load(); got != 1 {
 		t.Errorf("the config was read %d times, want 1", got)
+	}
+}
+
+// set changes what glab's config holds, as glab or the user would.
+func (rig *reloadRig) set(f func()) {
+	rig.mu.Lock()
+	defer rig.mu.Unlock()
+	f()
+}
+
+// The config that is read again after a 401 is only looked at for a token:
+// the config the command started with still says which host is the default
+// one. An "inbox wait" asks for the default host at each poll, and must not
+// move to another instance because "host:" changed in glab's config.
+func TestRereadConfigDoesNotChangeTheDefaultHost(t *testing.T) {
+	rig := newReloadRig(t, 1, nil)
+	before, err := rig.rt.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.set(func() { rig.token, rig.host = "new", "code.pan.run" })
+	if failed := rig.get(t, 1); failed != 0 {
+		t.Fatal("the request must be made again with the new token")
+	}
+	if got := rig.loads.Load(); got != 2 {
+		t.Fatalf("the config was read %d times, want 2", got)
+	}
+	after, err := rig.rt.Config()
+	if err != nil || after != before {
+		t.Errorf("the config of the command changed: %p, then %p (%v)", before, after, err)
+	}
+	if host, err := rig.rt.DefaultHost(); err != nil || host != "gitlab.com" {
+		t.Errorf("the default host is %q, want gitlab.com as when the command started (%v)", host, err)
+	}
+	if c, err := rig.rt.Client(""); err != nil || c.Host.Name != "gitlab.com" {
+		t.Errorf("the client of the default host: %+v %v", c, err)
+	}
+	if got := rig.loads.Load(); got != 2 {
+		t.Errorf("the config was read %d times, want 2: asking for it does not read it again", got)
+	}
+}
+
+// When the config cannot be read again, the command keeps the one it
+// started with, and the next 401 reads the file again.
+func TestFailedRereadKeepsTheConfig(t *testing.T) {
+	rig := newReloadRig(t, 1, nil)
+	before, err := rig.rt.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.set(func() { rig.fail = errors.New("reading config.yml: invalid YAML near line 3") })
+	if failed := rig.get(t, 1); failed != 1 {
+		t.Fatal("the request must fail with the 401")
+	}
+	after, err := rig.rt.Config()
+	if err != nil || after != before || after == nil {
+		t.Errorf("the config of the command changed: %p, then %p (%v)", before, after, err)
+	}
+	if host, err := rig.rt.DefaultHost(); err != nil || host != "gitlab.com" {
+		t.Errorf("the default host is %q (%v)", host, err)
+	}
+	if got := rig.loads.Load(); got != 2 {
+		t.Errorf("the config was read %d times, want 2", got)
+	}
+	// The file is whole again, with the new token.
+	rig.set(func() { rig.fail, rig.token = nil, "new" })
+	if failed := rig.get(t, 1); failed != 0 {
+		t.Error("the request must be made again with the new token")
+	}
+	if got := rig.loads.Load(); got != 3 {
+		t.Errorf("the config was read %d times, want 3", got)
+	}
+}
+
+// A token of the environment is for the default host of the config the
+// command started with. When the file, read again, names as its default
+// host the one whose token was rejected, the token of the environment is
+// not sent there.
+func TestRereadConfigDoesNotBringTheEnvToken(t *testing.T) {
+	// 2 rejections would mean that a second token was tried.
+	rig := newReloadRig(t, 1, map[string]string{"GLCLI_TOKEN": "new"})
+	rig.rt.HostFlag = "code.pan.run"
+	c, err := rig.rt.Client("")
+	if err != nil || c.Host.Name != "code.pan.run" || c.Host.Token != "other" {
+		t.Fatalf("the client: %+v %v", c, err)
+	}
+	rig.set(func() { rig.host = "code.pan.run" })
+	var u gitlab.User
+	if err := c.Get(context.Background(), "user", nil, &u); !gitlab.IsStatus(err, 401) {
+		t.Errorf("got %+v %v, want the 401: the token of the environment, which GitLab would take, is not for this host", u, err)
+	}
+	rig.mu.Lock()
+	defer rig.mu.Unlock()
+	if rig.rejected != 1 {
+		t.Errorf("%d requests were rejected, want 1", rig.rejected)
 	}
 }
