@@ -19,17 +19,17 @@ import (
 	"github.com/maelvls/glcli/internal/gitlab"
 )
 
-// stepClock moves forward by step each time it is read. With a step of at
+// pipelineStepClock moves forward by step each time it is read. With a step of at
 // least --interval, Poll never sleeps for real (each sleep is already over
 // when it looks at the clock), and the time that passes in a test is the
 // number of times the command read the clock.
-type stepClock struct {
+type pipelineStepClock struct {
 	mu   sync.Mutex
 	now  time.Time
 	step time.Duration
 }
 
-func (c *stepClock) Now() time.Time {
+func (c *pipelineStepClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(c.step)
@@ -37,7 +37,7 @@ func (c *stepClock) Now() time.Time {
 }
 
 // peek reads the clock without moving it.
-func (c *stepClock) peek() time.Time {
+func (c *pipelineStepClock) peek() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
@@ -47,10 +47,10 @@ func (c *stepClock) peek() time.Time {
 const waitMR = "projects/group/project/merge_requests/1"
 
 // waitEnv runs "pipeline wait group/project!1" against a fake GitLab, with
-// a stepClock.
+// a pipelineStepClock.
 type waitEnv struct {
 	rt             *cli.Runtime
-	clock          *stepClock
+	clock          *pipelineStepClock
 	stdout, stderr bytes.Buffer
 
 	mu      sync.Mutex
@@ -67,7 +67,7 @@ func newWaitEnv(t *testing.T, answer func(path string) (body string, status int)
 		t.Setenv(env, "")
 	}
 	e := &waitEnv{
-		clock:   &stepClock{now: time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC), step: 10 * time.Second},
+		clock:   &pipelineStepClock{now: time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC), step: 10 * time.Second},
 		seen:    map[string]int{},
 		queries: map[string][]url.Values{},
 	}
@@ -113,7 +113,7 @@ func (e *waitEnv) count(path string) int {
 	return e.seen[path]
 }
 
-// wait runs the command (polling every 5s of the stepClock) and returns
+// wait runs the command (polling every 5s of the pipelineStepClock) and returns
 // its exit code and the JSON it printed.
 func (e *waitEnv) wait(t *testing.T, args ...string) (code int, out map[string]json.RawMessage) {
 	t.Helper()
@@ -610,7 +610,7 @@ func TestPipelineWaitRetriesTheFinalRead(t *testing.T) {
 }
 
 // add moves the clock forward: the machine slept.
-func (c *stepClock) add(d time.Duration) {
+func (c *pipelineStepClock) add(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
