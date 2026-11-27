@@ -48,7 +48,9 @@ type FailedJob struct {
 
 // Report is a pipeline and its downstream pipelines.
 type Report struct {
-	Pipeline   Summary     `json:"pipeline"`
+	// Pipeline is left out while the commit has no pipeline yet, rather
+	// than printed as {"id":0}.
+	Pipeline   Summary     `json:"pipeline,omitzero"`
 	Downstream []Summary   `json:"downstream,omitempty"`
 	FailedJobs []FailedJob `json:"failed_jobs"`
 	// Running is true while any pipeline of the tree has not finished.
