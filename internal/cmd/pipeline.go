@@ -219,6 +219,8 @@ pipeline), 1 on error, 130 when interrupted.`,
 			statusOnly := f.options()
 			statusOnly.StatusOnly = true
 			var (
+				// last is the latest report of the pipeline lastID: nil
+				// until that pipeline has been read.
 				last   *pipeline.Report
 				lastID int
 				// GitLab has had since createSince to create the pipeline
@@ -232,8 +234,6 @@ pipeline), 1 on error, 130 when interrupted.`,
 					return false, err
 				}
 				if t.id == 0 {
-					// The report of an earlier head says nothing of this commit.
-					last = nil
 					// The wall clock, as in Poll: GitLab kept working while
 					// this machine slept, and it has just answered that
 					// there is still no pipeline.
@@ -250,10 +250,13 @@ pipeline), 1 on error, 130 when interrupted.`,
 					return noPipeline, nil
 				}
 				createSince = time.Time{}
-				if t.id != lastID && lastID != 0 {
-					rt.Notef("now waiting for pipeline %d (new head %s)", t.id, t.sha)
+				if t.id != lastID {
+					if lastID != 0 {
+						rt.Notef("now waiting for pipeline %d (new head %s)", t.id, t.sha)
+					}
+					// The report of another pipeline says nothing of this one.
+					last, lastID = nil, t.id
 				}
-				lastID = t.id
 				r, err := pipeline.Collect(ctx, t.client, t.project, t.id, statusOnly)
 				if err != nil {
 					return false, err
@@ -276,22 +279,32 @@ pipeline), 1 on error, 130 when interrupted.`,
 				rt.Hintf("GitLab created no pipeline for %s within %s (--create-timeout), so there is nothing to wait for. The likely causes: %s. If a pipeline is still expected, run the same command again, with a longer --create-timeout.", t.sha, createTimeout, noPipelineCauses)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{}, SHA: t.sha, NoPipeline: true}, "failed_jobs")
 			}
-			if last == nil {
+			if t.id == 0 {
 				rt.Hintf("No pipeline was created for %s within %s (--timeout): run the same command again to keep waiting for it.", t.sha, w.timeout)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha, TimedOut: true}, "failed_jobs")
 			}
 			if timedOut {
 				// The current state, with the jobs that have failed so far.
-				if r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options()); err != nil {
-					rt.Warnf("the failed jobs could not be read: %v", err)
-				} else {
-					last = r
+				r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options())
+				switch {
+				case err == nil:
+					// It may have finished just now.
+					last, timedOut = r, r.Running
+					if timedOut {
+						rt.Hintf("The pipeline was still running after %s: run the same command again to keep waiting.", w.timeout)
+					}
+				case last == nil:
+					// GitLab named this pipeline and never let it be read.
+					last = &pipeline.Report{Pipeline: pipeline.Summary{ID: t.id, Project: t.project}, Running: true}
+					rt.Warnf("pipeline %d could not be read: %v", t.id, err)
+				default:
+					// What the last poll saw, without the jobs: it must
+					// not pass for the whole result, so it stays timed out.
+					rt.Warnf("the failed jobs of pipeline %d could not be read: %v", t.id, err)
 				}
-				// It may have finished just now.
-				timedOut = last.Running
-			}
-			if timedOut {
-				rt.Hintf("The pipeline was still running after %s: run the same command again to keep waiting.", w.timeout)
+				if err != nil {
+					rt.Hintf("GitLab could not be read when the wait ended after %s (--timeout): run the same command again.", w.timeout)
+				}
 			}
 			return printPipeline(rt, pipelineResult{Report: last, TimedOut: timedOut})
 		},

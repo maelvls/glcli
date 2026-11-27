@@ -440,3 +440,169 @@ func TestPipelineWarnsAboutALogItCannotRead(t *testing.T) {
 		})
 	}
 }
+
+// outage is what GitLab answers when it is failing: Poll tries again.
+const outage = `{"message":"500 Internal Server Error"}`
+
+// with answers like answers, except for the paths of except.
+func with(answers func(path string) (string, int), except map[string]func() (string, int)) func(path string) (string, int) {
+	return func(path string) (string, int) {
+		if f, ok := except[path]; ok {
+			return f()
+		}
+		return answers(path)
+	}
+}
+
+// printed reads the pipeline, the warnings and the hints of a result.
+func printed(t *testing.T, e *waitEnv, out map[string]json.RawMessage) (id int, status string, warnings, hints []string) {
+	t.Helper()
+	var p struct {
+		ID     int    `json:"id"`
+		Status string `json:"status"`
+	}
+	for key, into := range map[string]any{"pipeline": &p, "warnings": &warnings, "hints": &hints} {
+		if raw, ok := out[key]; ok {
+			if err := json.Unmarshal(raw, into); err != nil {
+				t.Fatalf("%s: %v: %s", key, err, e.stdout.String())
+			}
+		}
+	}
+	return p.ID, p.Status, warnings, hints
+}
+
+// The failed jobs of the head's pipeline cannot be read, someone pushes,
+// and the new head's pipeline cannot be read either: on timeout, the
+// pipeline printed is the new one, not the finished pipeline of the old
+// head, and the warning is about the pipeline printed.
+func TestPipelineWaitTimeoutDoesNotPrintThePreviousPipeline(t *testing.T) {
+	var (
+		e     *waitEnv
+		start time.Time
+	)
+	old := onePipeline(func() string { return "failed" })
+	e = newWaitEnv(t, with(old, map[string]func() (string, int){
+		waitMR: func() (string, int) {
+			if e.clock.peek().Sub(start) < time.Minute {
+				return old(waitMR)
+			}
+			return `{"iid":1,"project_id":5,"sha":"bbb222","head_pipeline":{"id":9,"sha":"bbb222","ref":"refs/merge-requests/1/head","status":"running"}}`, 200
+		},
+		waitPipeline + "/jobs":               func() (string, int) { return outage, 500 },
+		"projects/group/project/pipelines/9": func() (string, int) { return outage, 500 },
+	}))
+	start = e.clock.peek()
+	code, out := e.wait(t, "--timeout", "3m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	line := e.stdout.String()
+	id, status, warnings, hints := printed(t, e, out)
+	if id != 9 || status != "" {
+		t.Errorf("want the pipeline 9, of which nothing is known, got %s", line)
+	}
+	if string(out["timed_out"]) != "true" || string(out["running"]) != "true" || len(hints) != 1 {
+		t.Errorf("want timed_out, running and a hint, got %s", line)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "pipeline 9 could not be read") || !strings.Contains(warnings[0], "HTTP 500") {
+		t.Errorf("want one warning about the pipeline 9, got %s", line)
+	}
+	if e.count(waitPipeline) == 0 || e.count("projects/group/project/pipelines/9") == 0 {
+		t.Errorf("the test must have read both pipelines: %v", e.seen)
+	}
+}
+
+// The pipeline has failed but its jobs cannot be read before --timeout:
+// the result is not complete, and must not look so.
+func TestPipelineWaitTimeoutWhenTheFailedJobsCannotBeRead(t *testing.T) {
+	for _, pipelineStatus := range []string{"failed", "running"} {
+		t.Run(pipelineStatus, func(t *testing.T) {
+			e := newWaitEnv(t, with(onePipeline(func() string { return pipelineStatus }), map[string]func() (string, int){
+				waitPipeline + "/jobs": func() (string, int) { return outage, 500 },
+			}))
+			code, out := e.wait(t, "--timeout", "2m")
+			if code != 0 {
+				t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+			}
+			line := e.stdout.String()
+			id, status, warnings, hints := printed(t, e, out)
+			if id != 7 || status != pipelineStatus || string(out["failed_jobs"]) != "[]" {
+				t.Errorf("want the pipeline 7, %s, without jobs, got %s", pipelineStatus, line)
+			}
+			if string(out["timed_out"]) != "true" || len(hints) != 1 {
+				t.Errorf("want timed_out and a hint, got %s", line)
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], "the failed jobs of pipeline 7 could not be read") {
+				t.Errorf("want one warning about the jobs of the pipeline 7, got %s", line)
+			}
+		})
+	}
+}
+
+// Someone pushes while the pipeline of the old head runs, and the new
+// head has no pipeline when --timeout expires: the old pipeline is not
+// the answer.
+func TestPipelineWaitTimeoutAfterAPushWithoutPipeline(t *testing.T) {
+	var (
+		e     *waitEnv
+		start time.Time
+	)
+	old := onePipeline(func() string { return "running" })
+	e = newWaitEnv(t, func(path string) (string, int) {
+		if e.clock.peek().Sub(start) < time.Minute {
+			return old(path)
+		}
+		switch path {
+		case waitMR:
+			return `{"iid":1,"project_id":5,"sha":"bbb222"}`, 200
+		case waitMR + "/pipelines":
+			return `[{"id":7,"sha":"aaa111","ref":"refs/merge-requests/1/head","status":"running"}]`, 200
+		}
+		return old(path)
+	})
+	start = e.clock.peek()
+	code, out := e.wait(t, "--timeout", "3m", "--create-timeout", "10m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	if e.count(waitPipeline) == 0 {
+		t.Fatal("the test must have read the pipeline of the old head")
+	}
+	id, _, _, _ := printed(t, e, out)
+	if id == 7 || string(out["sha"]) != `"bbb222"` || string(out["timed_out"]) != "true" || string(out["running"]) != "true" {
+		t.Errorf("want no pipeline yet for bbb222 and timed_out, got %s", e.stdout.String())
+	}
+}
+
+// The pipeline has finished, and GitLab fails while its failed jobs are
+// read: that read is tried again, and the result is complete.
+func TestPipelineWaitRetriesTheFinalRead(t *testing.T) {
+	asked := 0
+	answers := onePipeline(func() string { return "failed" })
+	e := newWaitEnv(t, with(answers, map[string]func() (string, int){
+		waitPipeline + "/jobs": func() (string, int) {
+			if asked++; asked == 1 {
+				return outage, 500
+			}
+			return answers(waitPipeline + "/jobs")
+		},
+	}))
+	code, out := e.wait(t)
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	var jobs []struct {
+		Name string `json:"name"`
+		Log  string `json:"log"`
+	}
+	if err := json.Unmarshal(out["failed_jobs"], &jobs); err != nil || len(jobs) != 1 || jobs[0].Name != "test" || jobs[0].Log == "" {
+		t.Errorf("want the failed job with its log, got %s", e.stdout.String())
+	}
+	_, timedOut := out["timed_out"]
+	if _, warned := out["warnings"]; timedOut || warned || string(out["running"]) != "false" {
+		t.Errorf("want a finished pipeline, no timed_out and no warning, got %s", e.stdout.String())
+	}
+	if asked != 2 {
+		t.Errorf("the jobs were asked for %d times, want 2: the failure, then the retry", asked)
+	}
+}
