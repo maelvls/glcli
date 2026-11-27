@@ -269,6 +269,26 @@ func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int)
 	return warnings
 }
 
+// Denied reports whether err is GitLab refusing to show something to this
+// token: HTTP 403, or 404, which is what it answers for a project (and all
+// that is in it) the token cannot see at all.
+func Denied(err error) bool {
+	return gitlab.IsStatus(err, 403) || gitlab.IsStatus(err, 404)
+}
+
+// FromMR is the report of a pipeline of a merge request that could not be
+// read (err) because it runs in a fork the token cannot read: what the
+// merge request says of it (fork, see Found.Fork), and a warning for what
+// is missing. The merge request is read again at each poll of "pipeline
+// wait", so this status is as fresh as one read from the pipeline.
+func FromMR(fork Summary, err error) *Report {
+	return &Report{
+		Pipeline: fork,
+		Running:  !mr.Finished(fork.Status),
+		Warnings: []string{fmt.Sprintf("pipeline %d of this merge request runs in another project, %s (the fork the merge request comes from), which this token cannot read: %v. Its status (%s) is the one the merge request reports; its failed jobs and its downstream pipelines are not in this result.", fork.ID, fork.Project, err, fork.Status)},
+	}
+}
+
 // Found is what ForMR found for a commit of a merge request.
 type Found struct {
 	// ID is the pipeline of the commit, 0 when there is none: GitLab has
@@ -288,6 +308,13 @@ type Found struct {
 	// may or may not have run on SHA: their merge commit cannot be read
 	// (HTTP 404).
 	Unchecked int
+	// Fork is the pipeline ID as the merge request reports it, when it
+	// belongs to another project than the merge request: a merge request
+	// from a fork has its pipelines in the fork (its source project),
+	// except those a member of the parent project ran there. The pipeline
+	// is to be read from Fork.Project. Nil when the pipeline is in the
+	// project of the merge request.
+	Fork *Summary
 }
 
 // ForMR finds the pipeline of a merge request for the commit sha (full or
@@ -297,6 +324,9 @@ type Found struct {
 // temporary merge commit of the commit (see mr.PipelineOnCommit): that is
 // looked into for the head pipeline, and for the others only when sha is
 // given, since it costs a request for each of them.
+//
+// The pipeline is not always in the project of the merge request: see
+// Found.Fork.
 func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, error) {
 	var m gitlab.MergeRequest
 	if err := c.Get(ctx, mr.Base(r), nil, &m); err != nil {
@@ -308,6 +338,15 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 		sha = m.SHA
 	}
 	found := Found{SHA: sha, Head: m.SHA}
+	// take makes p the pipeline found. GitLab gives the project of each
+	// pipeline (project_id), in head_pipeline as in the list.
+	take := func(p gitlab.PipelineRef) {
+		found.ID, found.Fork = p.ID, nil
+		if p.ProjectID != 0 && m.ProjectID != 0 && p.ProjectID != m.ProjectID {
+			s := summary(p, strconv.Itoa(p.ProjectID))
+			found.Fork = &s
+		}
+	}
 	unconfirmed, unchecked := 0, 0
 	hp := m.HeadPipeline
 	if hp != nil {
@@ -316,7 +355,7 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 			return found, err
 		}
 		if on == mr.OnCommitYes {
-			found.ID = hp.ID
+			take(*hp)
 			return found, nil
 		}
 		if on == mr.OnCommitUnknown {
@@ -341,7 +380,7 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 			// listed are those of older commits, not worth a request
 			// each.
 			if strings.HasPrefix(p.SHA, sha) {
-				found.ID = p.ID
+				take(p)
 			}
 			continue
 		}
@@ -351,7 +390,7 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 		}
 		switch on {
 		case mr.OnCommitYes:
-			found.ID = p.ID
+			take(p)
 		case mr.OnCommitUnknown:
 			unchecked++
 		}

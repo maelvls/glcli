@@ -115,6 +115,11 @@ const (
 // costs one request per pipeline, once. Only the merge commit of the head
 // pipeline is asked for again when it cannot be read: it is recent, and
 // may become readable.
+//
+// The merge commit is read from the project of the merge request, also
+// when the merge request comes from a fork and its other pipelines run in
+// the fork: GitLab creates merged-results and merge-train pipelines in
+// the target project, the only one to have these refs.
 func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest, p gitlab.PipelineRef, sha string) (OnCommit, error) {
 	if sha == "" {
 		return OnCommitNo, nil

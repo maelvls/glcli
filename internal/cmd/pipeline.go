@@ -85,6 +85,10 @@ type pipelineTarget struct {
 	// unchecked is how many pipelines could not be checked for sha, when
 	// id is 0.
 	unchecked int
+	// fork is the pipeline id as the merge request reports it, when it
+	// runs in the fork the merge request comes from: project is then the
+	// fork (see pipeline.Found).
+	fork *pipeline.Summary
 }
 
 func openPipeline(rt *cli.Runtime, arg string) (*pipelineTarget, error) {
@@ -120,7 +124,24 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 		return err
 	}
 	t.id, t.sha, t.head, t.unconfirmed, t.unchecked = found.ID, found.SHA, found.Head, found.Unconfirmed, found.Unchecked
+	// Each pipeline has its own project: the head pipeline may be in the
+	// fork while the pipeline of an older commit ran in the parent project.
+	t.project, t.fork = t.mr.Project, found.Fork
+	if t.fork != nil {
+		t.project = t.fork.Project
+	}
 	return nil
+}
+
+// collect reports on the pipeline. A pipeline that runs in a fork the
+// token cannot read (HTTP 403 or 404) is not an error: the report is then
+// what the merge request says of it, with a warning.
+func (t *pipelineTarget) collect(ctx context.Context, o pipeline.Options) (*pipeline.Report, error) {
+	r, err := pipeline.Collect(ctx, t.client, t.project, t.id, o)
+	if t.fork != nil && t.fork.ID == t.id && pipeline.Denied(err) {
+		return pipeline.FromMR(*t.fork, err), nil
+	}
+	return r, err
 }
 
 // noPipelineHint says why the commit has no pipeline, as far as can be
@@ -207,7 +228,7 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 				}
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha}, "failed_jobs")
 			}
-			r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options())
+			r, err := t.collect(ctx, f.options())
 			if err != nil {
 				return err
 			}
@@ -347,7 +368,7 @@ pipeline), 1 on error, 130 when interrupted.`,
 					// The report of another pipeline says nothing of this one.
 					last, lastID, lastSHA = nil, t.id, t.sha
 				}
-				r, err := pipeline.Collect(ctx, t.client, t.project, t.id, statusOnly)
+				r, err := t.collect(ctx, statusOnly)
 				if err != nil {
 					return false, err
 				}
@@ -355,7 +376,7 @@ pipeline), 1 on error, 130 when interrupted.`,
 				if r.Running {
 					return false, nil
 				}
-				if r, err = pipeline.Collect(ctx, t.client, t.project, t.id, f.options()); err != nil {
+				if r, err = t.collect(ctx, f.options()); err != nil {
 					return false, err
 				}
 				last = r
@@ -386,7 +407,7 @@ pipeline), 1 on error, 130 when interrupted.`,
 			}
 			if timedOut {
 				// The current state, with the jobs that have failed so far.
-				r, err := pipeline.Collect(ctx, t.client, t.project, t.id, f.options())
+				r, err := t.collect(ctx, f.options())
 				switch {
 				case err == nil:
 					// It may have finished just now.
