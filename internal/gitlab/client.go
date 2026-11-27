@@ -74,11 +74,21 @@ func New(h config.Host) *Client {
 // redirect leaves the host or goes from https to http on it. Go only
 // strips Authorization and cookies, not PRIVATE-TOKEN, keeps them for a
 // subdomain and another port, and does not look at the scheme.
+//
+// Once a redirect of the chain has left, the token is not sent again,
+// even back on the host over https: where the request goes next was
+// chosen by where it had gone, not by GitLab. (Go does the same with
+// Authorization after a redirect to another domain; it puts PRIVATE-TOKEN
+// back on each hop, from the first request.)
 func keepTokenOnHost(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
-	if leavesHost(via[0].URL, req.URL) {
+	left := leavesHost(via[0].URL, req.URL)
+	for _, hop := range via[1:] {
+		left = left || leavesHost(via[0].URL, hop.URL)
+	}
+	if left {
 		req.Header.Del("PRIVATE-TOKEN")
 		req.Header.Del("Authorization")
 	}
@@ -254,8 +264,8 @@ func (c *Client) send(ctx context.Context, h config.Host, path string, q url.Val
 		apiErr := &APIError{Host: h.Name, TokenSource: h.TokenSource, OAuth: h.OAuth, TokenExpiry: h.Expiry, Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
 		// On the host of the request, the request that was answered tells
 		// whether the token went with it: not after a redirect to http,
-		// and Go does not put Authorization back on a redirect that comes
-		// back to the host after leaving it.
+		// nor after a chain of redirects that came back to the host after
+		// leaving it (see keepTokenOnHost).
 		if final := resp.Request; final.URL.Host != req.URL.Host {
 			apiErr.RedirectedTo = final.URL.Host
 		} else if h.Token != "" && final.Header.Get("PRIVATE-TOKEN") == "" && final.Header.Get("Authorization") == "" {

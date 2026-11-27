@@ -59,8 +59,16 @@ func TestKeepTokenOnHost(t *testing.T) {
 		{"http to another host", []string{"http://gitlab.internal/api/v4/a"}, "http://example.com/a", false},
 		{"to http after another host", []string{"https://gitlab.com/a", "https://example.com/a"}, "http://gitlab.com/a", false},
 		{"to http after a redirect on the host", []string{"https://gitlab.com/a", "https://gitlab.com/b"}, "http://gitlab.com/c", false},
-		{"back to the host over https, after http", []string{"https://gitlab.com/a", "http://gitlab.com/a"}, "https://gitlab.com/b", true},
-		{"back to the host, after another host", []string{"https://gitlab.com/a", "https://example.com/a"}, "https://gitlab.com/b", true},
+		// Once the chain has left the host, the token stays behind for
+		// the rest of it: the hop that came back was chosen elsewhere.
+		{"back to the host over https, after http", []string{"https://gitlab.com/a", "http://gitlab.com/a"}, "https://gitlab.com/b", false},
+		{"back to the host, after another host", []string{"https://gitlab.com/a", "https://example.com/a"}, "https://gitlab.com/b", false},
+		{"back to the host, after a subdomain", []string{"https://gitlab.com/a", "https://sub.gitlab.com/a"}, "https://gitlab.com/b", false},
+		{"back to the host, after another port", []string{"https://gitlab.com/a", "https://gitlab.com:8443/a"}, "https://gitlab.com/b", false},
+		{"on the host again, two hops after another host", []string{"https://gitlab.com/a", "https://example.com/a", "https://gitlab.com/b"}, "https://gitlab.com/c", false},
+		{"on the host again, two hops after http", []string{"https://gitlab.com/a", "http://gitlab.com/a", "https://gitlab.com/b"}, "https://gitlab.com/c", false},
+		{"on the host all along, three hops", []string{"https://gitlab.com/a", "https://gitlab.com/b", "https://gitlab.com/c"}, "https://gitlab.com/d", true},
+		{"http and back to http, on a host glab reaches over http", []string{"http://gitlab.internal/a", "https://gitlab.internal/a"}, "http://gitlab.internal/b", true},
 		{"from another host to a third one", []string{"https://gitlab.com/a", "https://example.com/a"}, "https://example.org/a", false},
 	} {
 		var via []*http.Request
@@ -223,16 +231,16 @@ func TestRedirectFromHTTPSToHTTPDropsBothHeaders(t *testing.T) {
 				t.Errorf("got %q over https and %q over http, want %q and nothing", secure, clear, want)
 			}
 
-			// https, http, then https again: never in clear. Back on https,
-			// PRIVATE-TOKEN is sent again; Go itself does not put
-			// Authorization back once it has dropped it.
+			// https, http, then https again: never in clear, and not sent
+			// again back on https, in either header. The page the request
+			// came back to was chosen by what answered over http.
 			secure, clear = nil, nil
 			err = c.Get(context.Background(), "down-and-back", nil, &out)
 			if want := []string{"/api/v4/back "}; fmt.Sprint(clear) != fmt.Sprint(want) {
 				t.Errorf("the token was sent in clear: got %q, want %q", clear, want)
 			}
-			if len(secure) != 2 || secure[0] != "/api/v4/down-and-back "+sent || (secure[1] != "/api/v4/secure "+sent && secure[1] != "/api/v4/secure ") {
-				t.Errorf("over https: got %q", secure)
+			if want := []string{"/api/v4/down-and-back " + sent, "/api/v4/secure "}; fmt.Sprint(secure) != fmt.Sprint(want) {
+				t.Errorf("over https: got %q, want %q", secure, want)
 			}
 			if err != nil {
 				t.Errorf("the last answer is a 200: %v", err)
@@ -251,5 +259,52 @@ func TestNewChecksRedirects(t *testing.T) {
 	}
 	if err := c.HTTP.CheckRedirect(req, via); err != nil || tokenHeaders(req) != "" {
 		t.Errorf("got %q, %v", tokenHeaders(req), err)
+	}
+}
+
+// A redirect to another host, which sends the request back to the first
+// one at an address of its choosing: the token does not go there, in
+// either header, and a 401 that follows says nothing about the token (the
+// Renewer is not asked, the error says where the request ended).
+func TestRedirectBackToTheHostDoesNotBringTheTokenBack(t *testing.T) {
+	for _, tc := range redirectHosts {
+		t.Run(tc.kind, func(t *testing.T) {
+			var back []string
+			var glURL string
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := tokenHeaders(r); got != "" {
+					t.Errorf("the token was sent to another host: %q", got)
+				}
+				http.Redirect(w, r, glURL+"/api/v4/chosen-elsewhere", http.StatusFound)
+			}))
+			defer other.Close()
+			gl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v4/chosen-elsewhere" {
+					back = append(back, tokenHeaders(r))
+					w.WriteHeader(http.StatusUnauthorized)
+					fmt.Fprint(w, `{"message":"401 Unauthorized"}`)
+					return
+				}
+				http.Redirect(w, r, other.URL+"/x", http.StatusFound)
+			}))
+			defer gl.Close()
+			glURL = gl.URL
+			renewer := &fakeRenewer{next: []config.Host{{Token: "new"}}}
+			c := New(tc.host)
+			c.BaseURL = gl.URL
+			c.Renewer = renewer
+			var out map[string]any
+			err := c.Get(context.Background(), "leave", nil, &out)
+			if want := []string{""}; fmt.Sprint(back) != fmt.Sprint(want) {
+				t.Errorf("back on the host: got %q, want one request without the token", back)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != 401 || apiErr.RedirectedTo != gl.URL {
+				t.Errorf("want a 401 that tells where the request ended (%s), got %#v", gl.URL, err)
+			}
+			if len(renewer.calls) != 0 {
+				t.Errorf("the renewer was asked %d times: this 401 is not about the token", len(renewer.calls))
+			}
+		})
 	}
 }
