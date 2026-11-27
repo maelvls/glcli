@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -61,6 +62,9 @@ type pipelineTarget struct {
 	id      int
 	mr      *ref.MR
 	sha     string
+	// unconfirmed is the head pipeline of the merge request when id is 0
+	// and GitLab cannot tell whether it ran on sha (see pipeline.Found).
+	unconfirmed int
 }
 
 func openPipeline(rt *cli.Runtime, arg string) (*pipelineTarget, error) {
@@ -91,12 +95,18 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 	if t.mr == nil {
 		return nil
 	}
-	id, head, err := pipeline.ForMR(ctx, t.client, *t.mr, sha)
+	found, err := pipeline.ForMR(ctx, t.client, *t.mr, sha)
 	if err != nil {
 		return err
 	}
-	t.id, t.sha = id, head
+	t.id, t.sha, t.unconfirmed = found.ID, found.SHA, found.Unconfirmed
 	return nil
+}
+
+// unconfirmedWarning says that a head pipeline could not be tied to the
+// commit it is awaited for.
+func unconfirmedWarning(id int, sha string) string {
+	return fmt.Sprintf("could not confirm that pipeline %d ran on %s: its merge commit cannot be read (HTTP 404)", id, sha)
 }
 
 type pipelineResult struct {
@@ -151,6 +161,9 @@ Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 				return err
 			}
 			if t.id == 0 {
+				if t.unconfirmed != 0 {
+					rt.Warnf("%s", unconfirmedWarning(t.unconfirmed, t.sha))
+				}
 				rt.Hintf("No pipeline for %s: GitLab may still be creating it (it takes a few seconds after a push), or this commit will never have one (%s). `glcli pipeline wait` waits for it, and prints \"no_pipeline\": true when none is created.", t.sha, noPipelineCauses)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha}, "failed_jobs")
 			}
@@ -230,6 +243,9 @@ pipeline), 1 on error, 130 when interrupted.`,
 				noPipeline  bool
 				// GitLab has not answered since outageSince.
 				outageSince time.Time
+				// unconfirmed is true when the pipeline waited on is the
+				// head pipeline, which GitLab cannot tie to the commit.
+				unconfirmed bool
 			)
 			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
 				if err := t.resolve(ctx, f.sha); err != nil {
@@ -260,12 +276,25 @@ pipeline), 1 on error, 130 when interrupted.`,
 							rt.Notef("no pipeline for %s yet: waiting for GitLab to create it", t.sha)
 						}
 					}
-					noPipeline = createTimeout > 0 && now.Sub(createSince) >= createTimeout
-					return noPipeline, nil
+					switch {
+					case createTimeout == 0 || now.Sub(createSince) < createTimeout:
+						return false, nil
+					case t.unconfirmed == 0:
+						noPipeline = true
+						return true, nil
+					}
+					// The head pipeline is on a merge commit that still
+					// cannot be read. It is most likely the pipeline of
+					// this commit, and certainly not "no pipeline".
+					t.id, unconfirmed = t.unconfirmed, true
+				} else {
+					createSince, unconfirmed = time.Time{}, false
 				}
-				createSince = time.Time{}
 				if t.id != lastID {
-					if lastID != 0 {
+					switch {
+					case unconfirmed:
+						rt.Notef("cannot confirm that pipeline %d is the pipeline of %s (its merge commit cannot be read): waiting for it all the same", t.id, t.sha)
+					case lastID != 0:
 						rt.Notef("now waiting for pipeline %d (new head %s)", t.id, t.sha)
 					}
 					// The report of another pipeline says nothing of this one.
@@ -294,8 +323,14 @@ pipeline), 1 on error, 130 when interrupted.`,
 				return rt.Print(pipelineResult{Report: &pipeline.Report{}, SHA: t.sha, NoPipeline: true}, "failed_jobs")
 			}
 			if t.id == 0 {
+				if t.unconfirmed != 0 {
+					rt.Warnf("%s", unconfirmedWarning(t.unconfirmed, t.sha))
+				}
 				rt.Hintf("No pipeline was created for %s within %s (--timeout): run the same command again to keep waiting for it.", t.sha, w.timeout)
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha, TimedOut: true}, "failed_jobs")
+			}
+			if unconfirmed {
+				rt.Warnf("%s", unconfirmedWarning(t.id, t.sha))
 			}
 			if timedOut {
 				// The current state, with the jobs that have failed so far.

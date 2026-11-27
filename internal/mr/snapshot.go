@@ -83,8 +83,22 @@ func PipelineIsHead(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest
 	if m.HeadPipeline == nil {
 		return false, nil
 	}
-	return PipelineOnCommit(ctx, c, m, *m.HeadPipeline, m.SHA)
+	on, err := PipelineOnCommit(ctx, c, m, *m.HeadPipeline, m.SHA)
+	return on == OnCommitYes, err
 }
+
+// OnCommit is the answer of PipelineOnCommit.
+type OnCommit int
+
+const (
+	// OnCommitNo: the pipeline ran on another commit.
+	OnCommitNo OnCommit = iota
+	// OnCommitYes: it ran on the commit, or on a merge commit of it.
+	OnCommitYes
+	// OnCommitUnknown: it ran on a merged-results or merge-train commit
+	// that cannot be read (HTTP 404), so its parents are not known.
+	OnCommitUnknown
+)
 
 // PipelineOnCommit reports whether the pipeline p of the merge request m
 // ran on the commit sha (full or abbreviated): on that commit itself, or
@@ -92,16 +106,16 @@ func PipelineIsHead(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest
 // pipeline (ref refs/merge-requests/<iid>/merge or /train) is a temporary
 // merge commit, which has the commit among its parents: reading them
 // costs one request per pipeline, once.
-func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest, p gitlab.PipelineRef, sha string) (bool, error) {
+func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeRequest, p gitlab.PipelineRef, sha string) (OnCommit, error) {
 	if sha == "" {
-		return false, nil
+		return OnCommitNo, nil
 	}
 	if strings.HasPrefix(p.SHA, sha) {
-		return true, nil
+		return OnCommitYes, nil
 	}
 	prefix := "refs/merge-requests/" + strconv.Itoa(m.IID) + "/"
 	if p.Ref != prefix+"merge" && p.Ref != prefix+"train" {
-		return false, nil
+		return OnCommitNo, nil
 	}
 	key := c.Host.Name + "/" + strconv.Itoa(m.ProjectID) + "/" + p.SHA
 	parents, ok := mergeParents.Load(key)
@@ -111,15 +125,18 @@ func PipelineOnCommit(ctx context.Context, c *gitlab.Client, m gitlab.MergeReque
 		}
 		err := c.Get(ctx, "projects/"+strconv.Itoa(m.ProjectID)+"/repository/commits/"+p.SHA, nil, &commit)
 		if gitlab.IsStatus(err, 404) {
-			return false, nil
+			return OnCommitUnknown, nil
 		}
 		if err != nil {
-			return false, err
+			return OnCommitNo, err
 		}
 		parents = commit.ParentIDs
 		mergeParents.Store(key, parents)
 	}
-	return slices.ContainsFunc(parents.([]string), func(parent string) bool { return strings.HasPrefix(parent, sha) }), nil
+	if slices.ContainsFunc(parents.([]string), func(parent string) bool { return strings.HasPrefix(parent, sha) }) {
+		return OnCommitYes, nil
+	}
+	return OnCommitNo, nil
 }
 
 func fetchOnce(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, error) {

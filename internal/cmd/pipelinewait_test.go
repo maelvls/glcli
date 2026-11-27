@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -739,5 +741,125 @@ func TestPipelineWaitCreateTimeoutRestartsWhenThePipelineIsGone(t *testing.T) {
 	}
 	if waited := e.clock.peek().Sub(gone); waited < 2*time.Minute {
 		t.Errorf("gave up %s after the pipeline was gone, before --create-timeout", waited)
+	}
+}
+
+// mergeCommits numbers the merge commits of the tests: their parents are
+// cached for as long as the process lives.
+var mergeCommits atomic.Int64
+
+// mergedResultsPipeline is a merge request whose head pipeline (7) runs
+// on a merge commit, as in a project with merged-results pipelines.
+// status is asked each time the pipeline is read, readable each time the
+// merge commit is.
+func mergedResultsPipeline(status func() string, readable func() bool) func(path string) (string, int) {
+	merge := fmt.Sprintf("merge%06d", mergeCommits.Add(1))
+	head := `{"id":7,"sha":"` + merge + `","ref":"refs/merge-requests/1/merge","status":"running"}`
+	return with(onePipeline(status), map[string]func() (string, int){
+		waitMR: func() (string, int) {
+			return `{"iid":1,"project_id":5,"sha":"aaa111","head_pipeline":` + head + `}`, 200
+		},
+		waitMR + "/pipelines": func() (string, int) { return `[` + head + `]`, 200 },
+		"projects/5/repository/commits/" + merge: func() (string, int) {
+			if !readable() {
+				return `{"message":"404 Commit Not Found"}`, 404
+			}
+			return `{"parent_ids":["ccc333","aaa111"]}`, 200
+		},
+	})
+}
+
+// The head pipeline runs on a merge commit that cannot be read. It is not
+// "no pipeline": after --create-timeout it is waited on, and printed with
+// a warning.
+func TestPipelineWaitHeadPipelineOnAnUnreadableMergeCommit(t *testing.T) {
+	var (
+		e         *waitEnv
+		start     time.Time
+		firstRead time.Time
+	)
+	e = newWaitEnv(t, mergedResultsPipeline(func() string {
+		now := e.clock.peek()
+		if firstRead.IsZero() {
+			firstRead = now
+		}
+		if now.Sub(start) < 4*time.Minute {
+			return "running"
+		}
+		return "failed"
+	}, func() bool { return false }))
+	start = e.clock.peek()
+	code, out := e.wait(t, "--create-timeout", "2m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	line := e.stdout.String()
+	id, status, warnings, _ := printed(t, e, out)
+	if _, ok := out["no_pipeline"]; ok || id != 7 || status != "failed" {
+		t.Errorf("want the pipeline 7, failed, and no no_pipeline, got %s", line)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "could not confirm that pipeline 7 ran on aaa111") {
+		t.Errorf("want a warning that the pipeline could not be confirmed, got %s", line)
+	}
+	checkFailedJobs(t, e, out)
+	// Until --create-timeout, the commit may become readable.
+	if waited := firstRead.Sub(start); waited < 2*time.Minute {
+		t.Errorf("the unconfirmed pipeline was waited on after %s, before --create-timeout", waited)
+	}
+	if n := strings.Count(e.stderr.String(), "cannot confirm that pipeline 7 is the pipeline of aaa111"); n != 1 {
+		t.Errorf("want one note on stderr, got %d: %s", n, e.stderr.String())
+	}
+}
+
+// The merge commit becomes readable before --create-timeout: the pipeline
+// is confirmed, and printed without a warning.
+func TestPipelineWaitMergeCommitBecomesReadable(t *testing.T) {
+	var (
+		e     *waitEnv
+		start time.Time
+	)
+	e = newWaitEnv(t, mergedResultsPipeline(
+		func() string { return "success" },
+		func() bool { return e.clock.peek().Sub(start) >= time.Minute },
+	))
+	start = e.clock.peek()
+	code, out := e.wait(t, "--create-timeout", "10m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	id, status, warnings, _ := printed(t, e, out)
+	if id != 7 || status != "success" || len(warnings) != 0 {
+		t.Errorf("want the pipeline 7, success, without a warning, got %s", e.stdout.String())
+	}
+	if waited := e.clock.peek().Sub(start); waited >= 10*time.Minute {
+		t.Errorf("waited %s: until --create-timeout, although the commit was readable after 1m", waited)
+	}
+}
+
+// --timeout or "pipeline get" before the unconfirmed pipeline is waited
+// on: there is no pipeline to print, and the warning says which pipeline
+// could not be confirmed.
+func TestPipelineUnconfirmedHeadPipelineIsWarnedAbout(t *testing.T) {
+	for _, args := range [][]string{
+		{"pipeline", "get", "group/project!1"},
+		{"pipeline", "wait", "group/project!1", "--interval", "5s", "--timeout", "1m"},
+	} {
+		t.Run(args[1], func(t *testing.T) {
+			e := newWaitEnv(t, mergedResultsPipeline(func() string { return "running" }, func() bool { return false }))
+			code, out := e.run(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+			}
+			id, _, warnings, hints := printed(t, e, out)
+			if id != 0 || string(out["running"]) != "true" || string(out["sha"]) != `"aaa111"` || len(hints) != 1 {
+				t.Errorf("want no pipeline yet for aaa111, got %s", e.stdout.String())
+			}
+			if _, ok := out["no_pipeline"]; ok {
+				t.Errorf("want no no_pipeline, got %s", e.stdout.String())
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], "could not confirm that pipeline 7 ran on aaa111") {
+				t.Errorf("want a warning that the pipeline could not be confirmed, got %s", e.stdout.String())
+			}
+		})
 	}
 }

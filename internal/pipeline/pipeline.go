@@ -269,48 +269,70 @@ func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int)
 	return warnings
 }
 
+// Found is what ForMR found for a commit of a merge request.
+type Found struct {
+	// ID is the pipeline of the commit, 0 when there is none: GitLab has
+	// not created it yet, or never will.
+	ID int
+	// SHA is the commit: the head of the merge request (in full), or
+	// the SHA asked for.
+	SHA string
+	// Unconfirmed is the head pipeline of the merge request when ID is 0
+	// and that pipeline may well be the pipeline of the head commit: it
+	// runs on a merged-results or merge-train commit that cannot be read
+	// (HTTP 404), so its parents could not be checked.
+	Unconfirmed int
+}
+
 // ForMR finds the pipeline of a merge request for the commit sha (full or
 // abbreviated; the head commit when empty): the head pipeline when it ran
 // on that commit, else the newest of the last 20 pipelines of the merge
 // request that did. A merged-results or merge-train pipeline runs on a
-// temporary merge commit of the commit (see mr.PipelineOnCommit). It
-// returns 0 when there is none: GitLab has not created it yet, or never
-// will.
-func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (id int, headSHA string, err error) {
+// temporary merge commit of the commit (see mr.PipelineOnCommit).
+func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, error) {
 	var m gitlab.MergeRequest
 	if err := c.Get(ctx, mr.Base(r), nil, &m); err != nil {
-		return 0, "", err
+		return Found{}, err
 	}
-	if sha == "" || strings.HasPrefix(m.SHA, sha) {
+	head := sha == "" || strings.HasPrefix(m.SHA, sha)
+	if head {
 		sha = m.SHA
 	}
+	found := Found{SHA: sha}
+	unconfirmed := 0
 	if hp := m.HeadPipeline; hp != nil {
 		on, err := mr.PipelineOnCommit(ctx, c, m, *hp, sha)
 		if err != nil {
-			return 0, sha, err
+			return found, err
 		}
-		if on {
-			return hp.ID, sha, nil
+		if on == mr.OnCommitYes {
+			found.ID = hp.ID
+			return found, nil
+		}
+		if on == mr.OnCommitUnknown && head {
+			unconfirmed = hp.ID
 		}
 	}
 	var list []gitlab.PipelineRef
 	if err := c.Get(ctx, mr.Base(r)+"/pipelines", url.Values{"per_page": {"20"}}, &list); err != nil {
-		return 0, sha, err
+		return found, err
 	}
-	best := 0
 	for _, p := range list {
 		// GitLab lists the newest first: the pipelines older than one
 		// that matches are not looked at, which spares their commits.
-		if p.ID <= best {
+		if p.ID <= found.ID {
 			continue
 		}
 		on, err := mr.PipelineOnCommit(ctx, c, m, p, sha)
 		if err != nil {
-			return 0, sha, err
+			return found, err
 		}
-		if on {
-			best = p.ID
+		if on == mr.OnCommitYes {
+			found.ID = p.ID
 		}
 	}
-	return best, sha, nil
+	if found.ID == 0 {
+		found.Unconfirmed = unconfirmed
+	}
+	return found, nil
 }

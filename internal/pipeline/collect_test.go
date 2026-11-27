@@ -117,13 +117,13 @@ func TestForMRFindsMergedResultsPipelineOfAnOlderCommit(t *testing.T) {
 			f := mergedResults()
 			c := f.client(t)
 			for range 2 {
-				id, got, err := ForMR(context.Background(), c, testMR, sha)
+				got, err := ForMR(context.Background(), c, testMR, sha)
 				if err != nil {
 					t.Fatal(err)
 				}
 				// 93 and 90 ran on it: the newest wins.
-				if id != 93 || got != sha {
-					t.Errorf("ForMR(%s) = %d, %s; want pipeline 93", sha, id, got)
+				if want := (Found{ID: 93, SHA: sha}); got != want {
+					t.Errorf("ForMR(%s) = %+v, want %+v", sha, got, want)
 				}
 			}
 			// One request per merge commit looked at, whatever the number
@@ -147,12 +147,12 @@ func TestForMRHeadOfMergedResults(t *testing.T) {
 	for _, sha := range []string{"", headSHA, headSHA[:8]} {
 		t.Run(sha, func(t *testing.T) {
 			f := mergedResults()
-			id, got, err := ForMR(context.Background(), f.client(t), testMR, sha)
+			got, err := ForMR(context.Background(), f.client(t), testMR, sha)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if id != 95 || got != headSHA {
-				t.Errorf("ForMR(%q) = %d, %s; want the head pipeline 95 and the full head SHA", sha, id, got)
+			if want := (Found{ID: 95, SHA: headSHA}); got != want {
+				t.Errorf("ForMR(%q) = %+v; want the head pipeline and the full head SHA, %+v", sha, got, want)
 			}
 		})
 	}
@@ -162,9 +162,9 @@ func TestForMRWithoutPipelineForTheCommit(t *testing.T) {
 	f := mergedResults()
 	// No pipeline ran on this commit, and the commit of pipeline 80
 	// cannot be read (404): that is not an error.
-	id, _, err := ForMR(context.Background(), f.client(t), testMR, "dddd3333")
-	if err != nil || id != 0 {
-		t.Errorf("ForMR = %d, %v; want 0 and no error", id, err)
+	got, err := ForMR(context.Background(), f.client(t), testMR, "dddd3333")
+	if want := (Found{SHA: "dddd3333"}); err != nil || got != want {
+		t.Errorf("ForMR = %+v, %v; want %+v and no error", got, err, want)
 	}
 }
 
@@ -179,9 +179,9 @@ func TestForMRPipelineOnTheCommitItself(t *testing.T) {
 			{"id":90,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"failed"},
 			{"id":85,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"failed"}]`),
 	}}
-	id, _, err := ForMR(context.Background(), f.client(t), testMR, oldSHA[:8])
-	if err != nil || id != 90 {
-		t.Errorf("ForMR = %d, %v; want pipeline 90", id, err)
+	got, err := ForMR(context.Background(), f.client(t), testMR, oldSHA[:8])
+	if err != nil || got.ID != 90 {
+		t.Errorf("ForMR = %+v, %v; want pipeline 90", got, err)
 	}
 }
 
@@ -351,5 +351,30 @@ func TestCollectWithoutLogsHasNoWarnings(t *testing.T) {
 	r, err := Collect(context.Background(), f.client(t), "group/project", 100, Options{Downstream: true, MaxDepth: 4})
 	if err != nil || len(r.Warnings) != 0 {
 		t.Errorf("want no warnings, got %q, %v", r.Warnings, err)
+	}
+}
+
+// The head pipeline runs on a merge commit that GitLab does not let read:
+// it cannot be said to be the pipeline of the head commit, nor ruled out.
+func TestForMRHeadPipelineOnAnUnreadableMergeCommit(t *testing.T) {
+	unreadable := func() *fake {
+		f := mergedResults()
+		delete(f.routes, "projects/5/repository/commits/m95")
+		return f
+	}
+	for _, sha := range []string{"", headSHA[:8]} {
+		got, err := ForMR(context.Background(), unreadable().client(t), testMR, sha)
+		if want := (Found{SHA: headSHA, Unconfirmed: 95}); err != nil || got != want {
+			t.Errorf("ForMR(%q) = %+v, %v; want %+v", sha, got, err, want)
+		}
+	}
+	// An older commit: the head pipeline is not a candidate for it.
+	got, err := ForMR(context.Background(), unreadable().client(t), testMR, oldSHA)
+	if want := (Found{ID: 93, SHA: oldSHA}); err != nil || got != want {
+		t.Errorf("ForMR(old) = %+v, %v; want %+v", got, err, want)
+	}
+	got, err = ForMR(context.Background(), unreadable().client(t), testMR, "dddd3333")
+	if want := (Found{SHA: "dddd3333"}); err != nil || got != want {
+		t.Errorf("ForMR(unknown) = %+v, %v; want %+v", got, err, want)
 	}
 }
