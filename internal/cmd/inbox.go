@@ -168,8 +168,9 @@ todo_ids, body}], checked_at}.`,
 
 func newInboxWait(rt *cli.Runtime) *cobra.Command {
 	var (
-		f inboxFlags
-		w waitFlags
+		f      inboxFlags
+		w      waitFlags
+		follow bool
 	)
 	cmd := &cobra.Command{
 		Use:   "wait",
@@ -195,13 +196,40 @@ again before it is printed.
 
 Prints what "inbox" prints; on timeout, items is [], timed_out is true,
 and checked_at is the --since to wait again with. Exit codes: 0 (also on
-timeout), 1 on error, 130 when interrupted.`,
+timeout), 1 on error, 130 when interrupted.
+
+--follow does not exit when something is new: it prints one line of
+compact JSON with the new items and goes on, until --timeout or an
+interruption. Every line has a "type" and the "checked_at" to resume from
+(pass the last one read to --since):
+
+  {"type":"items","items":[...],"checked_at":"..."}
+  {"type":"warning","message":"cannot reach GitLab, trying again: ...","checked_at":"..."}
+  {"type":"end","reason":"timeout|interrupted","checked_at":"..."}
+  {"type":"error","error":"...","checked_at":"..."}
+
+An item is printed again only when its reasons or its "at" change. One
+that shows up late with an older "at" (a review requested on an old
+merge request) is printed too, but only by a stream that was already
+running: a new one only sees what is newer than its --since. A warning
+line comes once per outage, and another when GitLab answers again. An
+error line comes before the usual exit code and message on stderr.`,
 		Example: `  glcli inbox wait
   glcli inbox wait --since 2026-11-26T14:30:00+01:00 --timeout 4h
   glcli inbox wait --role review,todo --interval 5m`,
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (err error) {
 			ctx := cmd.Context()
+			var resume time.Time
+			var st *stream
+			if follow {
+				st = &stream{rt: rt, resume: func(l *streamLine) {
+					if !resume.IsZero() {
+						l.CheckedAt = &resume
+					}
+				}}
+				defer func() { st.stop(ctx, err) }()
+			}
 			if err := w.check(); err != nil {
 				return err
 			}
@@ -213,6 +241,10 @@ timeout), 1 on error, 130 when interrupted.`,
 				since = rt.Now().Round(0).Truncate(time.Second)
 			}
 			f.cache = inbox.NewCache(rt.Now)
+			if follow {
+				resume = since
+				return followInbox(ctx, rt, st, f, w, since, &resume)
+			}
 			var res *inboxResult
 			check := func() (bool, error) {
 				rt.ResetWarnings()
@@ -251,5 +283,92 @@ timeout), 1 on error, 130 when interrupted.`,
 	}
 	addInboxFlags(cmd, &f)
 	addWaitFlags(cmd, &w, defaultInboxInterval)
+	cmd.Flags().BoolVar(&follow, "follow", false, "Do not exit: print one JSON line each time something is new (see above)")
 	return cmd
+}
+
+// inboxItemsLine is a line of "inbox wait --follow".
+type inboxItemsLine struct {
+	Type      string       `json:"type"`
+	Items     []inbox.Item `json:"items"`
+	CheckedAt time.Time    `json:"checked_at"`
+}
+
+// followInbox is the loop of "inbox wait --follow". inbox has no cursor,
+// only times: an item is new when what is printed of it, its reasons and
+// its "at", differs from what was last printed of it. The first poll,
+// which reads everything, sets aside what is older than since, as inbox
+// wait does; after that, an item is new whatever its "at", so one that
+// shows up late with an older "at" (a review requested on an old merge
+// request, a to-do item dated in the past) is printed once, where
+// waiting again with --since would not see it.
+//
+// What is printed comes from a poll that read everything, as in inbox
+// wait (see inbox.Cache): its checked_at is a --since from which a new
+// wait misses nothing that this line did not print, and becomes the
+// checked_at of the lines that do not carry results (*resume).
+func followInbox(ctx context.Context, rt *cli.Runtime, st *stream, f inboxFlags, w waitFlags, since time.Time, resume *time.Time) error {
+	printed := map[string]string{}
+	first := true
+	fresh := func(items []inbox.Item) []inbox.Item {
+		var out []inbox.Item
+		for _, it := range items {
+			if it.Waiting() && printed[it.URL] != itemPrint(it) {
+				out = append(out, it)
+			}
+		}
+		return out
+	}
+	timedOut, err := rt.PollNotify(ctx, w.interval, w.timeout, func() (bool, error) {
+		rt.ResetWarnings()
+		res, items, err := collectInbox(ctx, rt, f)
+		if err != nil {
+			return false, err
+		}
+		st.answered()
+		if first {
+			first = false
+			for _, it := range items {
+				if it.Waiting() && !it.At.After(since) {
+					printed[it.URL] = itemPrint(it)
+				}
+			}
+		}
+		news := fresh(items)
+		if len(news) == 0 {
+			return false, nil
+		}
+		if f.cache.Kept() {
+			// Read everything before printing, as inbox wait does.
+			f.cache.Expire()
+			rt.ResetWarnings()
+			if res, items, err = collectInbox(ctx, rt, f); err != nil {
+				return false, err
+			}
+			if news = fresh(items); len(news) == 0 {
+				return false, nil
+			}
+		}
+		if err := rt.PrintLine(inboxItemsLine{Type: "items", Items: news, CheckedAt: res.CheckedAt}, "items"); err != nil {
+			return false, err
+		}
+		for _, it := range news {
+			printed[it.URL] = itemPrint(it)
+		}
+		*resume = res.CheckedAt
+		return false, nil
+	}, st.outage)
+	if err != nil {
+		return err
+	}
+	if timedOut {
+		st.end("timeout")
+	}
+	return nil
+}
+
+// itemPrint is what makes an item new for inbox wait --follow: its
+// reasons and when the newest one happened.
+func itemPrint(it inbox.Item) string {
+	return strings.Join(it.Reasons, ",") + "@" + it.At.UTC().Format(time.RFC3339Nano)
 }
