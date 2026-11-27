@@ -274,3 +274,18 @@ func TestPipelineWaitNeverReadableIsNotAnError(t *testing.T) {
 		t.Errorf("want the wait to end at poll 5 on the unreadable pipeline 20, failed, got poll %d and %s", l.poll, e.stdout.String())
 	}
 }
+
+// The tree has finished, and the refusal comes with the read of the end,
+// the one that reads the jobs: that is not a result either.
+func TestPipelineWaitRefusedAtTheFinalRead(t *testing.T) {
+	l := &lostTree{refuse: func(path string, _, nth int) int {
+		// The poll reads the trigger jobs once; the read of the end, again.
+		if path == e2ePipeline+"/bridges" && nth == 2 {
+			return 403
+		}
+		return 0
+	}}
+	e := newWaitEnv(t, l.answers)
+	code, _ := e.wait(t)
+	lost(t, e, l, code, 1, "the downstream pipeline 20 (in group/e2e)", "HTTP 403")
+}
