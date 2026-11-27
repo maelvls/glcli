@@ -21,7 +21,10 @@ func newAuth(rt *cli.Runtime) *cobra.Command {
 without calling GitLab. Tokens are never printed.
 
 A host glab logged in to with OAuth has "token_kind": "oauth", and
-"expires_at" when glab's config says when its token expires.`,
+"expires_at" when glab's config says when its token expires. glcli never
+renews such a token: glab does, when it calls GitLab (for instance
+"glab auth status --hostname <host>"), and glcli reads the new one from
+glab's config, even in the middle of a wait command.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := rt.Config()
@@ -58,6 +61,9 @@ A host glab logged in to with OAuth has "token_kind": "oauth", and
 					row.TokenKind = "oauth"
 					if !h.Expiry.IsZero() {
 						row.ExpiresAt = h.Expiry.Format(time.RFC3339)
+						if err == nil && h.Expiry.Before(rt.Now()) {
+							rt.Hintf("The OAuth token of %s expired at %s. glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname %s` before the next glcli command.", n, row.ExpiresAt, n)
+						}
 					}
 				}
 				hosts = append(hosts, row)

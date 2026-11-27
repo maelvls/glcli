@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/maelvls/glcli/internal/config"
@@ -21,12 +22,38 @@ import (
 
 // Client talks to one GitLab instance.
 type Client struct {
+	// Host is the host as it was when the client was made, and is never
+	// written to afterwards. Once Renewer gave another token, requests
+	// carry that one, not Host.Token.
 	Host config.Host
 	HTTP *http.Client
 	// Trace, when set, is called once per request with a one-line summary.
 	Trace func(format string, args ...any)
 	// BaseURL overrides Host.BaseURL(), for tests.
 	BaseURL string
+	// Renewer, when set, is asked for another token when GitLab answers
+	// 401: the request is then made once more with it. The client itself
+	// never renews a token.
+	Renewer Renewer
+
+	mu      sync.Mutex
+	renewed *config.Host // Host with the last token Renewer gave
+}
+
+// A Renewer knows whether the token of a host was replaced since a client
+// read it: glab renews the token of an OAuth login when it expires, and
+// writes the new one to its config. cli.Runtime is one, by reading that
+// config again.
+type Renewer interface {
+	// Generation is read before each request and handed back to Renew
+	// with the answer to it: it tells Renew which requests left before it
+	// last looked for new tokens.
+	Generation() int
+	// Renew is called after GitLab answered 401 to a request made with
+	// the token of rejected. It returns the host with the token to use
+	// instead and true, or false when there is no other token. It can be
+	// called by several goroutines at once.
+	Renew(rejected config.Host, generation int) (config.Host, bool)
 }
 
 // New returns a client for h.
@@ -77,6 +104,11 @@ type APIError struct {
 	// redirect from https to http on it), it is that host with the scheme,
 	// such as "http://gitlab.example.com".
 	RedirectedTo string
+	// OAuth says that the token that was sent is the OAuth access token of
+	// a login of glab (config.Host.OAuth), and TokenExpiry when glab's
+	// config says it expires (config.Host.Expiry; zero when it does not).
+	OAuth       bool
+	TokenExpiry time.Time
 }
 
 func (e *APIError) Error() string {
@@ -135,7 +167,49 @@ func (c *Client) base() string {
 	return c.Host.BaseURL()
 }
 
+// host is the host with the token to send now: the last one Renewer gave,
+// or else the one the client was made with.
+func (c *Client) host() config.Host {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.renewed != nil {
+		return *c.renewed
+	}
+	return c.Host
+}
+
+// do sends GET path. When GitLab answers 401 and Renewer has another token
+// for the host, it sends the request once more with that token, and the
+// requests that follow use it too: a command that waits for hours goes on
+// after glab renewed the token it started with.
 func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Response, error) {
+	h, generation := c.host(), 0
+	if c.Renewer != nil {
+		generation = c.Renewer.Generation()
+	}
+	resp, err := c.send(ctx, h, path, q)
+	var apiErr *APIError
+	// A 401 from where the token was not sent says nothing about the token.
+	if c.Renewer == nil || !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnauthorized || apiErr.RedirectedTo != "" {
+		return resp, err
+	}
+	other, ok := c.Renewer.Renew(h, generation)
+	if !ok || other.Token == h.Token {
+		return nil, err
+	}
+	// The same host, with the other token and what goes with it.
+	h.Token, h.OAuth, h.Expiry = other.Token, other.OAuth, other.Expiry
+	c.mu.Lock()
+	c.renewed = &h
+	c.mu.Unlock()
+	if c.Trace != nil {
+		c.Trace("GET %s %s: the token was rejected and there is another one for this host: trying again with it", h.Name, path)
+	}
+	return c.send(ctx, h, path, q)
+}
+
+// send sends GET path with the token of h.
+func (c *Client) send(ctx context.Context, h config.Host, path string, q url.Values) (*http.Response, error) {
 	u := c.base() + "/api/v4/" + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
@@ -144,7 +218,7 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 	if err != nil {
 		return nil, err
 	}
-	authorize(req, c.Host)
+	authorize(req, h)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "glcli")
 	start := time.Now()
@@ -154,7 +228,7 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 		if resp != nil {
 			status = "HTTP " + strconv.Itoa(resp.StatusCode)
 		}
-		c.Trace("GET %s %s: %s, %s", c.Host.Name, path, time.Since(start).Round(time.Millisecond), status)
+		c.Trace("GET %s %s: %s, %s", h.Name, path, time.Since(start).Round(time.Millisecond), status)
 	}
 	if err != nil {
 		return nil, err
@@ -162,14 +236,14 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 	if resp.StatusCode/100 != 2 {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		apiErr := &APIError{Host: c.Host.Name, TokenSource: c.Host.TokenSource, Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
+		apiErr := &APIError{Host: h.Name, TokenSource: h.TokenSource, OAuth: h.OAuth, TokenExpiry: h.Expiry, Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
 		// On the host of the request, the request that was answered tells
 		// whether the token went with it: not after a redirect to http,
 		// and Go does not put Authorization back on a redirect that comes
 		// back to the host after leaving it.
 		if final := resp.Request; final.URL.Host != req.URL.Host {
 			apiErr.RedirectedTo = final.URL.Host
-		} else if c.Host.Token != "" && final.Header.Get("PRIVATE-TOKEN") == "" && final.Header.Get("Authorization") == "" {
+		} else if h.Token != "" && final.Header.Get("PRIVATE-TOKEN") == "" && final.Header.Get("Authorization") == "" {
 			apiErr.RedirectedTo = final.URL.Scheme + "://" + final.URL.Host
 		}
 		return nil, apiErr

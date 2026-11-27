@@ -98,6 +98,14 @@ func commandTimeout() time.Duration {
 // tells), or change the environment variable when the token came from
 // one, since logging in would change nothing then. A 401 from another
 // host, after a redirect, says nothing about the token: it was not sent.
+//
+// The token of an OAuth login of glab expires (two hours after glab got
+// it, unless the instance says otherwise), and glab renews it, not glcli:
+// logging in again is not needed then. `glab auth status` is named
+// because it asks GitLab who the token belongs to, through the client of
+// glab that renews an expired token before it sends it. When the hint is
+// printed, glab's config has already been read again, and had no other
+// token (see cli.Runtime).
 func rejectedTokenHint(err error) string {
 	host, source := "<host>", ""
 	var apiErr *gitlab.APIError
@@ -112,6 +120,17 @@ func rejectedTokenHint(err error) string {
 	}
 	if strings.HasPrefix(source, "$") {
 		return "the token from " + source + " was rejected by " + host + ": unset it (glcli then reads glab's config) or replace it; `glcli auth status` shows where each token comes from"
+	}
+	if apiErr != nil && apiErr.OAuth {
+		what := "the OAuth token of " + host + " was rejected (glab's config does not say when it expires)"
+		switch expiry := apiErr.TokenExpiry; {
+		case expiry.IsZero():
+		case expiry.Before(time.Now()):
+			what = "the OAuth token of " + host + " expired at " + expiry.Format(time.RFC3339) + ", and glab's config has no newer one"
+		default:
+			what = "the OAuth token of " + host + " was rejected, although glab's config says that it expires at " + expiry.Format(time.RFC3339)
+		}
+		return what + ". glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname " + host + "`, then the same glcli command again (`mr wait` with the same --cursor misses nothing). If glab cannot renew it, run `glab auth login --hostname " + host + "`"
 	}
 	return "the token was rejected: run `glab auth login --hostname " + host + "` (glcli reads glab's config), or `glcli auth status`"
 }

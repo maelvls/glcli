@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func noRequest(t *testing.T) http.HandlerFunc {
@@ -18,17 +19,20 @@ func noRequest(t *testing.T) http.HandlerFunc {
 // their token expires, and never prints a token.
 func TestAuthStatusShowsOAuthHosts(t *testing.T) {
 	rt, stdout, stderr, path := fakeGitLabOnDisk(t, noRequest(t), oauthConfig("oauth-SECRET", "2026-11-27T19:42:10+01:00"))
+	// Before the token expires: see TestAuthStatusHintsAtAnExpiredOAuthToken.
+	rt.Now = func() time.Time { return time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC) }
 	if code := run(rt, []string{"auth", "status"}); code != 0 {
 		t.Fatalf("exit %d (stderr: %s)", code, stderr.String())
 	}
 	var got struct {
 		Config string
 		Hosts  []map[string]any
+		Hints  []string
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("%v: %s", err, stdout.String())
 	}
-	if got.Config != path || len(got.Hosts) != 2 {
+	if got.Config != path || len(got.Hosts) != 2 || len(got.Hints) != 0 {
 		t.Fatalf("got %s", stdout.String())
 	}
 	pat, oauth := got.Hosts[0], got.Hosts[1]
