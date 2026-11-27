@@ -1,5 +1,4 @@
 SKILLS_DIR ?= $(HOME)/.claude/skills
-SKILL_DEST := $(SKILLS_DIR)/glcli
 
 .PHONY: install install-bin install-skill test
 
@@ -10,17 +9,10 @@ install: install-bin install-skill
 install-bin:
 	go install ./cmd/glcli
 
-# Replaces the installed copy so that files removed from skills/ go away too.
-# A symlink (see the README) already follows the checkout and is left alone.
+# The skills are embedded in the binary: "glcli skills install" writes them.
+# A symlinked skill (see the README) follows the checkout and is left alone.
 install-skill:
-	@if [ -L "$(SKILL_DEST)" ]; then \
-		echo "$(SKILL_DEST) is a symlink, leaving it alone"; \
-	else \
-		mkdir -p "$(SKILLS_DIR)" && \
-		rm -rf "$(SKILL_DEST)" && \
-		cp -R skills/glcli "$(SKILL_DEST)" && \
-		echo "skill installed in $(SKILL_DEST)"; \
-	fi
+	go run ./cmd/glcli skills install --overwrite --dir "$(SKILLS_DIR)"
 
 test:
 	go test ./...

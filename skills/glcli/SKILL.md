@@ -5,7 +5,7 @@ description: "GitLab CLI for agents: what waits on the user across all projects 
 
 # glcli
 
-Use `glcli` from `$PATH`. If it is missing, tell the user: it is installed from a checkout of its repository with `make install`.
+Use `glcli` from `$PATH`. If it is missing, tell the user: `go install github.com/maelvls/glcli/cmd/glcli@latest`, then `glcli skills install`. This skill is embedded in the binary: after an upgrade, `glcli skills install --overwrite` updates it.
 
 `glcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. If a capability named here is absent from the installed help, report version skew instead of guessing.
 
