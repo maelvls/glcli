@@ -104,8 +104,9 @@ func commandTimeout() time.Duration {
 // logging in again is not needed then. `glab auth status` is named
 // because it asks GitLab who the token belongs to, through the client of
 // glab that renews an expired token before it sends it. When the hint is
-// printed, glab's config has already been read again, and had no other
-// token (see cli.Runtime).
+// printed, glab's config has already been read again (see cli.Runtime),
+// and had no other token; when it could not be read, the hint says so, with
+// the reason, which never repeats what the file holds (see config.Parse).
 func rejectedTokenHint(err error) string {
 	host, source := "<host>", ""
 	var apiErr *gitlab.APIError
@@ -126,18 +127,27 @@ func rejectedTokenHint(err error) string {
 	if apiErr != nil && errors.Is(apiErr.Renewal, gitlab.ErrLoginChanged) {
 		return "the token was rejected, and " + apiErr.Renewal.Error() + ". Run the same glcli command again: it will use the new login from its start"
 	}
+	// Whether glab's config has a newer token is not known when it could
+	// not be read again.
+	unread := ""
+	if apiErr != nil && apiErr.Renewal != nil {
+		unread = ", and glab's config could not be read again to look for a newer one (" + apiErr.Renewal.Error() + ")"
+	}
 	if apiErr != nil && apiErr.OAuth {
-		what := "the OAuth token of " + host + " was rejected (glab's config does not say when it expires)"
+		what, newer := "the OAuth token of "+host+" was rejected (glab's config does not say when it expires)", ""
 		switch expiry := apiErr.TokenExpiry; {
 		case expiry.IsZero():
 		case expiry.Before(time.Now()):
-			what = "the OAuth token of " + host + " expired at " + expiry.Format(time.RFC3339) + ", and glab's config has no newer one"
+			what, newer = "the OAuth token of "+host+" expired at "+expiry.Format(time.RFC3339), ", and glab's config has no newer one"
 		default:
 			what = "the OAuth token of " + host + " was rejected, although glab's config says that it expires at " + expiry.Format(time.RFC3339)
 		}
-		return what + ". glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname " + host + "`, then the same glcli command again (`mr wait` with the same --cursor misses nothing). If glab cannot renew it, run `glab auth login --hostname " + host + "`"
+		if unread != "" {
+			newer = unread
+		}
+		return what + newer + ". glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname " + host + "`, then the same glcli command again (`mr wait` with the same --cursor misses nothing). If glab cannot renew it, run `glab auth login --hostname " + host + "`"
 	}
-	return "the token was rejected: run `glab auth login --hostname " + host + "` (glcli reads glab's config), or `glcli auth status`"
+	return "the token was rejected" + unread + ": run `glab auth login --hostname " + host + "` (glcli reads glab's config), or `glcli auth status`"
 }
 
 type usageError struct{ error }

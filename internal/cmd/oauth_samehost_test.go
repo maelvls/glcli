@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -169,5 +170,97 @@ func TestRenewedTokenWithoutAUserIsUsed(t *testing.T) {
 				t.Errorf("got %s", got)
 			}
 		})
+	}
+}
+
+// When glab's config cannot be read again after a 401, nothing is known
+// of a newer token: the hint says that the file could not be read, and
+// why, instead of saying that it has no newer token. The reason is the
+// one glcli gives for such a file at any time: the file, a line, the kind
+// of problem, and nothing of what the file holds.
+func TestRejectedTokenHintSaysThatTheConfigCouldNotBeReadAgain(t *testing.T) {
+	// Tokens in every place the yaml package could quote.
+	secrets := "oauth-NEW-SECRET"
+	for _, tc := range []struct {
+		name, broken, reason string
+	}{
+		{"unclosed quote", "hosts:\n    gitlab.com:\n        token: \"" + secrets + "\n", "invalid YAML near line 3: found unexpected end of stream"},
+		{"bad indentation", "hosts:\n    gitlab.com:\n        token: " + secrets + "\n      user: me\n", "invalid YAML near line 1: did not find expected key"},
+		{"tabs", "hosts:\n\tgitlab.com:\n\t\ttoken: " + secrets + "\n", "invalid YAML near line 2: found character that cannot start any token"},
+		{"unknown anchor", "hosts:\n    gitlab.com:\n        token: *" + secrets + "\n", "invalid YAML"},
+		{"token as the file", secrets + "\n", "line 1: the file is not a mapping"},
+		{"token as hosts", "hosts: " + secrets + "\n", "line 1: hosts is not a mapping"},
+		{"token as a host", "hosts:\n    gitlab.com: " + secrets + "\n", "line 2: a host is not a mapping"},
+		{"list as token", "hosts:\n    gitlab.com:\n        token: [" + secrets + "]\n", "line 3: token is not a string"},
+		{"duplicate token", "hosts:\n    gitlab.com:\n        token: " + secrets + "\n        token: " + secrets + "\n", "line 4: duplicate key (first at line 3)"},
+		{"not UTF-8", "hosts:\n    gitlab.com:\n        token: " + secrets + "\xff\n", "invalid YAML: invalid leading UTF-8 octet"},
+	} {
+		for kind, before := range map[string]string{"OAuth token": oauthConfig("oauth-OLD-SECRET", past), "personal access token": patConfig("glpat-OLD-SECRET")} {
+			t.Run(tc.name+", "+kind, func(t *testing.T) {
+				g := &gate{accept: "nothing"}
+				rt, stdout, stderr, path := fakeGitLabOnDisk(t, g.handler(currentUser), before)
+				g.rejecting = func(int) { writeGlabConfig(t, path, tc.broken) }
+				if code := run(rt, []string{"auth", "test"}); code != 1 {
+					t.Fatalf("exit %d, want 1 (stdout: %s, stderr: %s)", code, stdout.String(), stderr.String())
+				}
+				unread := ", and glab's config could not be read again to look for a newer one (reading " + path + ": " + tc.reason + ")"
+				hint := "glcli: the OAuth token of gitlab.com expired at 2020-01-02T03:04:05Z" + unread + ". glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname gitlab.com`"
+				if kind == "personal access token" {
+					hint = "glcli: the token was rejected" + unread + ": run `glab auth login --hostname gitlab.com`"
+				}
+				got := stderr.String()
+				if !strings.HasPrefix(got, "glcli: GitLab GET user: HTTP 401: 401 Unauthorized\n"+hint) || strings.Count(got, "\n") != 2 {
+					t.Errorf("got:\n%s\nwant the 401, then a hint that starts with:\n%s", got, hint)
+				}
+				for _, not := range []string{"SECRET", "oauth-", "glpat", "refresh", "has no newer one"} {
+					if strings.Contains(got, not) {
+						t.Errorf("%q is not expected in:\n%s", not, got)
+					}
+				}
+				if n := len(g.requests()); n != 1 {
+					t.Errorf("%d requests, want 1", n)
+				}
+			})
+		}
+	}
+}
+
+// The same when the file cannot be opened at all: here a directory took
+// its place.
+func TestRejectedTokenHintWhenTheConfigIsNotAFile(t *testing.T) {
+	g := &gate{accept: "nothing"}
+	rt, _, stderr, path := fakeGitLabOnDisk(t, g.handler(currentUser), oauthConfig("oauth-OLD-SECRET", past))
+	g.rejecting = func(int) {
+		if err := os.Remove(path); err != nil {
+			t.Error(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	if code := run(rt, []string{"auth", "test"}); code != 1 {
+		t.Fatalf("exit %d, want 1 (stderr: %s)", code, stderr.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "expired at 2020-01-02T03:04:05Z, and glab's config could not be read again to look for a newer one (read "+path+": ") || strings.Contains(got, "has no newer one") || strings.Contains(got, "SECRET") {
+		t.Errorf("got:\n%s", got)
+	}
+}
+
+// A config that is gone is a config without hosts, as when glcli starts:
+// it was read, and has no newer token.
+func TestRejectedTokenHintWhenTheConfigIsGone(t *testing.T) {
+	g := &gate{accept: "nothing"}
+	rt, _, stderr, path := fakeGitLabOnDisk(t, g.handler(currentUser), oauthConfig("oauth-OLD-SECRET", past))
+	g.rejecting = func(int) {
+		if err := os.Remove(path); err != nil {
+			t.Error(err)
+		}
+	}
+	if code := run(rt, []string{"auth", "test"}); code != 1 {
+		t.Fatalf("exit %d, want 1 (stderr: %s)", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "expired at 2020-01-02T03:04:05Z, and glab's config has no newer one. ") || strings.Contains(got, "could not be read") {
+		t.Errorf("got:\n%s", got)
 	}
 }
