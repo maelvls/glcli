@@ -91,6 +91,11 @@ type Options struct {
 	// Memory is shared by the calls made for one "pipeline wait"; nil
 	// for a single report.
 	Memory *Memory
+	// Fork says that the pipeline reported on runs in the fork a merge
+	// request comes from (see Found.Fork), which the token may not read
+	// in full: the report then does without its jobs or its trigger
+	// jobs, as it does for a downstream pipeline.
+	Fork bool
 }
 
 // Memory is what the calls of Collect made for one wait remember: the
@@ -208,10 +213,11 @@ type node struct {
 // the report: the pipeline is listed with the status the trigger job that
 // started it gives, which is read again at each call, with the trigger
 // jobs of its parent; it is not followed further, it is marked Unreadable
-// and a warning says what is missing. The same refusal for the pipeline
-// the report is about (depth 0) is an error, as is any other error for
-// any pipeline, and a refusal of what GitLab showed earlier in the same
-// wait (see Memory).
+// and a warning says what is missing. The same goes for the pipeline the
+// report is about when it runs in the fork of a merge request
+// (Options.Fork). Otherwise a refusal for that pipeline (depth 0) is an
+// error, as is any other error for any pipeline, and a refusal of what
+// GitLab showed earlier in the same wait (see Memory).
 func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) error {
 	id, depth := n.ID, n.Depth
 	base := gitlab.Project(n.api) + "/pipelines/" + strconv.Itoa(id)
@@ -230,7 +236,7 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) e
 		if lost := o.Memory.lost(path, err); lost != nil {
 			return lost
 		}
-		if depth == 0 || !Denied(err) {
+		if !Denied(err) || (depth == 0 && !o.Fork) {
 			return err
 		}
 		missing = append(missing, lacks)
@@ -256,7 +262,13 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) e
 		}
 		r.Truncated = r.Truncated || truncated
 	}
-	if denied != nil {
+	switch {
+	case denied == nil:
+	case n.at < 0:
+		r.Pipeline.Unreadable = true
+		r.Warnings = append(r.Warnings, fmt.Sprintf("pipeline %d of this merge request runs in another project, %s (the fork the merge request comes from), where this token cannot read all of it: %v. %s",
+			n.ID, n.Project, denied, lacking(n.Summary, missing)))
+	default:
 		r.Downstream[n.at].Unreadable = true
 		r.Warnings = append(r.Warnings, unreadable(n.Summary, missing, denied))
 	}
@@ -437,7 +449,7 @@ func Denied(err error) bool {
 }
 
 // FromMR is the report of a pipeline of a merge request that could not be
-// read (err) because it runs in a fork the token cannot read: what the
+// read at all (err) because it runs in a fork the token cannot read: what the
 // merge request says of it (fork, see Found.Fork), and a warning for what
 // is missing. The merge request is read again at each poll of "pipeline
 // wait", so this status is as fresh as one read from the pipeline. It is

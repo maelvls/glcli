@@ -137,8 +137,12 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 // token cannot read (HTTP 403 or 404) is not an error: the report is then
 // what the merge request says of it, with a warning.
 func (t *pipelineTarget) collect(ctx context.Context, o pipeline.Options) (*pipeline.Report, error) {
+	o.Fork = t.fork != nil
 	r, err := pipeline.Collect(ctx, t.client, t.project, t.id, o)
 	if t.fork != nil && pipeline.Denied(err) {
+		// GitLab refuses the pipeline itself. When it shows the pipeline
+		// and refuses its jobs or its trigger jobs, Collect reports on
+		// what it could read (Options.Fork).
 		return pipeline.FromMR(*t.fork, err), nil
 	}
 	return r, err
