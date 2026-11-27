@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -56,9 +57,12 @@ type Report struct {
 	// AllowedFailures counts the failed jobs left out because they are
 	// allowed to fail (see --include-allowed).
 	AllowedFailures int `json:"allowed_failures,omitempty"`
-	// Truncated is true when a pipeline had more jobs (1000) or trigger
-	// jobs (500) than were read: failed jobs may be missing.
+	// Truncated is true when a pipeline had more failed jobs (1000) or
+	// trigger jobs (500) than were read: failed jobs may be missing.
 	Truncated bool `json:"truncated,omitempty"`
+	// Warnings say what could not be read, such as the log of a failed
+	// job. They are for the caller to print: not part of the JSON.
+	Warnings []string `json:"-"`
 }
 
 // Options tune the report.
@@ -68,6 +72,9 @@ type Options struct {
 	// Downstream follows trigger jobs into downstream pipelines.
 	Downstream bool
 	MaxDepth   int
+	// StatusOnly reads no jobs, only the status of each pipeline: what
+	// "pipeline wait" needs at each poll.
+	StatusOnly bool
 }
 
 // Collect reports on pipeline id of project (a path or numeric ID).
@@ -82,7 +89,7 @@ func Collect(ctx context.Context, c *gitlab.Client, project string, id int, o Op
 	}
 	r.Running = r.Running || !mr.Finished(p.Status)
 	if o.LogLines > 0 {
-		addLogs(ctx, c, r.FailedJobs, o.LogLines)
+		r.Warnings = append(r.Warnings, addLogs(ctx, c, r.FailedJobs, o.LogLines)...)
 	}
 	return r, nil
 }
@@ -108,23 +115,10 @@ func projectFromURL(u string) string {
 
 func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, depth int, o Options) error {
 	base := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id)
-	jobs, truncated, err := gitlab.GetAll[gitlab.Job](ctx, c, base+"/jobs", nil, 10)
-	if err != nil {
-		return err
-	}
-	r.Truncated = r.Truncated || truncated
-	for _, j := range jobs {
-		if j.Status != "failed" {
-			continue
+	if !o.StatusOnly {
+		if err := failedJobs(ctx, c, r, project, id, o); err != nil {
+			return err
 		}
-		if j.AllowFailure && !o.IncludeAllowed {
-			r.AllowedFailures++
-			continue
-		}
-		r.FailedJobs = append(r.FailedJobs, FailedJob{
-			ID: j.ID, Name: j.Name, Stage: j.Stage, Status: j.Status, URL: j.WebURL,
-			Pipeline: id, Project: project, FailureReason: j.FailureReason, AllowFailure: j.AllowFailure,
-		})
 	}
 	if !o.Downstream || depth >= o.MaxDepth {
 		return nil
@@ -155,6 +149,33 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, 
 		if err := walk(ctx, c, r, dproject, dp.ID, depth+1, o); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// failedJobs adds the failed jobs of one pipeline to r. GitLab is asked
+// for these only (scope[]=failed): a pipeline can have a thousand jobs. A
+// job that failed and was retried is not among them: without
+// include_retried, GitLab lists the latest run of each job.
+func failedJobs(ctx context.Context, c *gitlab.Client, r *Report, project string, id int, o Options) error {
+	path := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id) + "/jobs"
+	jobs, truncated, err := gitlab.GetAll[gitlab.Job](ctx, c, path, url.Values{"scope[]": {"failed"}}, 10)
+	if err != nil {
+		return err
+	}
+	r.Truncated = r.Truncated || truncated
+	for _, j := range jobs {
+		if j.Status != "failed" {
+			continue
+		}
+		if j.AllowFailure && !o.IncludeAllowed {
+			r.AllowedFailures++
+			continue
+		}
+		r.FailedJobs = append(r.FailedJobs, FailedJob{
+			ID: j.ID, Name: j.Name, Stage: j.Stage, Status: j.Status, URL: j.WebURL,
+			Pipeline: id, Project: project, FailureReason: j.FailureReason, AllowFailure: j.AllowFailure,
+		})
 	}
 	return nil
 }
@@ -215,9 +236,15 @@ func cleanLines(raw string) []string {
 	return out
 }
 
-func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int) {
+// addLogs reads the end of the log of each job, four at a time. A log
+// that cannot be read (a downstream project the token cannot read, an
+// erased job, a log too long to download in time) leaves the job without
+// "log": it returns one warning for each, in the order of the jobs.
+func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int) (warnings []string) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	// Each goroutine writes its own element of jobs and errs.
+	errs := make([]error, len(jobs))
 	for i := range jobs {
 		wg.Add(1)
 		go func() {
@@ -226,46 +253,111 @@ func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int)
 			defer func() { <-sem }()
 			// Lines are rarely longer than 300 bytes; read a generous tail.
 			raw, err := c.GetText(ctx, gitlab.Project(jobs[i].Project)+"/jobs/"+strconv.Itoa(jobs[i].ID)+"/trace", int64(lines)*400+32*1024)
-			if err == nil {
-				jobs[i].Log = CleanLog(raw, lines)
+			if err != nil {
+				errs[i] = err
+				return
 			}
+			jobs[i].Log = CleanLog(raw, lines)
 		}()
 	}
 	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("the log of the failed job %q (%d, in %s) could not be read: %v", jobs[i].Name, jobs[i].ID, jobs[i].Project, err))
+		}
+	}
+	return warnings
 }
 
-// ForMR finds the pipeline of a merge request for sha (its head when
-// empty): the head pipeline when it ran on that commit or on a
-// merged-results or merge-train commit of it, else the newest pipeline of
-// the merge request on that commit. It returns 0 when GitLab has not
-// created it yet.
-func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (id int, headSHA string, err error) {
+// Found is what ForMR found for a commit of a merge request.
+type Found struct {
+	// ID is the pipeline of the commit, 0 when there is none: GitLab has
+	// not created it yet, or never will.
+	ID int
+	// SHA is the commit: the head of the merge request (in full), or
+	// the SHA asked for.
+	SHA string
+	// Head is the head commit of the merge request.
+	Head string
+	// Unconfirmed is the head pipeline of the merge request when ID is 0
+	// and that pipeline may well be the pipeline of the head commit: it
+	// runs on a merged-results or merge-train commit that cannot be read
+	// (HTTP 404), so its parents could not be checked.
+	Unconfirmed int
+	// Unchecked is, when ID is 0, how many of the pipelines looked at
+	// may or may not have run on SHA: their merge commit cannot be read
+	// (HTTP 404).
+	Unchecked int
+}
+
+// ForMR finds the pipeline of a merge request for the commit sha (full or
+// abbreviated; the head commit when empty): the head pipeline when it ran
+// on that commit, else the newest of the last 20 pipelines of the merge
+// request that did. A merged-results or merge-train pipeline runs on a
+// temporary merge commit of the commit (see mr.PipelineOnCommit): that is
+// looked into for the head pipeline, and for the others only when sha is
+// given, since it costs a request for each of them.
+func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, error) {
 	var m gitlab.MergeRequest
 	if err := c.Get(ctx, mr.Base(r), nil, &m); err != nil {
-		return 0, "", err
+		return Found{}, err
 	}
-	if sha == "" || strings.HasPrefix(m.SHA, sha) {
+	given := sha != ""
+	head := !given || strings.HasPrefix(m.SHA, sha)
+	if head {
 		sha = m.SHA
-		isHead, err := mr.PipelineIsHead(ctx, c, m)
-		if err != nil {
-			return 0, sha, err
-		}
-		if isHead {
-			return m.HeadPipeline.ID, sha, nil
-		}
 	}
-	if hp := m.HeadPipeline; hp != nil && strings.HasPrefix(hp.SHA, sha) {
-		return hp.ID, sha, nil
+	found := Found{SHA: sha, Head: m.SHA}
+	unconfirmed, unchecked := 0, 0
+	hp := m.HeadPipeline
+	if hp != nil {
+		on, err := mr.PipelineOnCommit(ctx, c, m, *hp, sha)
+		if err != nil {
+			return found, err
+		}
+		if on == mr.OnCommitYes {
+			found.ID = hp.ID
+			return found, nil
+		}
+		if on == mr.OnCommitUnknown {
+			unchecked++
+			if head {
+				unconfirmed = hp.ID
+			}
+		}
 	}
 	var list []gitlab.PipelineRef
 	if err := c.Get(ctx, mr.Base(r)+"/pipelines", url.Values{"per_page": {"20"}}, &list); err != nil {
-		return 0, sha, err
+		return found, err
 	}
-	best := 0
 	for _, p := range list {
-		if strings.HasPrefix(p.SHA, sha) && p.ID > best {
-			best = p.ID
+		// GitLab lists the newest first: the pipelines older than one
+		// that matches are not looked at, which spares their commits.
+		if p.ID <= found.ID || (hp != nil && p.ID == hp.ID) {
+			continue
+		}
+		if !given {
+			// Waiting for the pipeline of a new head: the pipelines
+			// listed are those of older commits, not worth a request
+			// each.
+			if strings.HasPrefix(p.SHA, sha) {
+				found.ID = p.ID
+			}
+			continue
+		}
+		on, err := mr.PipelineOnCommit(ctx, c, m, p, sha)
+		if err != nil {
+			return found, err
+		}
+		switch on {
+		case mr.OnCommitYes:
+			found.ID = p.ID
+		case mr.OnCommitUnknown:
+			unchecked++
 		}
 	}
-	return best, sha, nil
+	if found.ID == 0 {
+		found.Unconfirmed, found.Unchecked = unconfirmed, unchecked
+	}
+	return found, nil
 }
