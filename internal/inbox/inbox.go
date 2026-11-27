@@ -220,24 +220,37 @@ func stripFragment(u string) string {
 
 // activity is what I and others did on a merge request, from its notes.
 type activity struct {
-	myLast      time.Time // my last comment, review note (isReviewNote) or push
+	// myReview is my last review action: a comment or a review note
+	// (isReviewNote). A push of mine is not one: who only rebased still
+	// owes the review.
+	myReview time.Time
+	// myLast is my last action of any kind: myReview or a push of mine.
+	myLast time.Time
+	// seenAt is until when I know the changes: myReview, or the pushes of
+	// mine that followed it with no push of someone else in between. A
+	// push of mine on top of changes I did not review does not make them
+	// seen.
+	seenAt      time.Time
 	reviewReqAt time.Time // last "requested review from @me"
 	repliesAt   time.Time // last human reply in my threads, or mention
 	commentsAt  time.Time // last human comment by someone else
 	approvedAt  time.Time // last approval, by anyone
-	pushedAt    time.Time
+	// pushedAt is the newest push that is not mine: I do not review my
+	// own pushes, and they must not date what waits on me.
+	pushedAt time.Time
 }
 
 func analyse(s *mr.Snapshot, p mr.People) activity {
 	var a activity
 	me := p.Me
-	if len(s.Versions) > 0 {
-		a.pushedAt = s.Versions[0].CreatedAt
-	}
+	var myPushes []time.Time
 	for _, d := range s.Discussions {
 		for _, n := range d.Notes {
-			if n.Author.Username == me && (!n.System || isReviewNote(n) || mr.IsPushNote(n)) {
-				a.myLast = later(a.myLast, n.CreatedAt)
+			if n.Author.Username == me && (!n.System || isReviewNote(n)) {
+				a.myReview = later(a.myReview, n.CreatedAt)
+			}
+			if n.Author.Username == me && mr.IsPushNote(n) {
+				myPushes = append(myPushes, n.CreatedAt)
 			}
 			if n.System && strings.HasPrefix(n.Body, "approved this merge request") {
 				a.approvedAt = later(a.approvedAt, n.CreatedAt)
@@ -246,6 +259,31 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 				a.reviewReqAt = later(a.reviewReqAt, n.CreatedAt)
 			}
 		}
+	}
+	a.myLast, a.seenAt = a.myReview, a.myReview
+	// Oldest first. GitLab creates the diff version of a push, then writes
+	// its "added N commits" note under who pushed
+	// (MergeRequests::RefreshService): a version is mine when a push note
+	// of mine falls between it and the next one. A push whose note is
+	// missing counts as someone else's.
+	foreign := false
+	for i := len(s.Versions) - 1; i >= 0; i-- {
+		v := s.Versions[i]
+		var mine time.Time
+		for _, t := range myPushes {
+			if !t.Before(v.CreatedAt) && (i == 0 || t.Before(s.Versions[i-1].CreatedAt)) {
+				mine = later(mine, t)
+			}
+		}
+		if mine.IsZero() {
+			a.pushedAt = v.CreatedAt
+			foreign = foreign || v.CreatedAt.After(a.myReview)
+		} else if !foreign {
+			a.seenAt = later(a.seenAt, mine)
+		}
+	}
+	for _, t := range myPushes {
+		a.myLast = later(a.myLast, t)
 	}
 	for _, d := range s.Discussions {
 		inMine := false
@@ -286,7 +324,8 @@ func isReviewNote(n gitlab.Note) bool {
 }
 
 // reviewItem is reviewItemWith on a GitLab whose patch IDs are not
-// trusted: every push after my last action counts as new commits.
+// trusted: every push of someone else after what I last saw counts as new
+// commits.
 func reviewItem(s *mr.Snapshot, p mr.People) Item {
 	return reviewItemWith(s, p, func() bool { return false })
 }
@@ -299,11 +338,11 @@ func reviewItemWith(s *mr.Snapshot, p mr.People, trusted func() bool) Item {
 	a := analyse(s, p)
 	it.myLast = a.myLast
 	switch {
-	case a.reviewReqAt.After(a.myLast):
+	case a.reviewReqAt.After(a.myReview):
 		it.add("review_requested", a.reviewReqAt)
-	case a.myLast.IsZero() && !it.ApprovedByMe:
+	case a.myReview.IsZero() && !it.ApprovedByMe:
 		it.add("review_requested", s.MR.CreatedAt)
-	case !it.ApprovedByMe && a.pushedAt.After(a.myLast):
+	case !it.ApprovedByMe && a.pushedAt.After(a.seenAt):
 		if at, unseen := unseenPush(s, p.Me, a, trusted); unseen {
 			it.add("new_commits", at)
 		}
@@ -332,41 +371,46 @@ func patchIDsTrusted(ctx context.Context, c *gitlab.Client) bool {
 // variable for the tests.
 var versionTimeout = 5 * time.Second
 
-// unseenPush reports whether the pushes since my last action left me
-// something to look at, and since when. They did not when the diff
-// version I last saw and the newest one have the same patch ID, as
-// computed by GitLab. Any doubt keeps them, dated like any push: a push
-// landed while fetching, notes are missing, a patch ID is missing or not
-// trusted, my last action is older than every version fetched.
+// unseenPush reports whether the pushes since what I last saw (a.seenAt)
+// left me something to look at, and since when. They did not when the
+// diff version I last saw and the newest one have the same patch ID, as
+// computed by GitLab. Any doubt keeps them, dated like any push that is
+// not mine: a push landed while fetching, notes are missing, a patch ID
+// is missing or not trusted, what I last saw is older than every version
+// fetched.
 //
-// The caller has checked that I am not among the approvers.
+// The caller has checked that I am not among the approvers, and that
+// someone else pushed since what I last saw.
 func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at time.Time, unseen bool) {
 	if s.Unsettled || s.DiscussionsTruncated || len(s.Versions) == 0 || s.Versions[0].PatchIDSHA == "" {
 		return a.pushedAt, true
 	}
 	newest := s.Versions[0]
-	// Versions are newest first: the first one not after my last action
+	// Versions are newest first: the first one not after what I last saw
 	// is the one I saw.
-	seen := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(a.myLast) })
+	seen := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(a.seenAt) })
 	same := seen >= 0 && s.Versions[seen].PatchIDSHA == newest.PatchIDSHA
-	// The changes arrived with the oldest of the pushes since my last
-	// action that all have the newest patch ID. The rebases that followed
+	// The changes arrived with the oldest of the pushes since what I last
+	// saw that all have the newest patch ID. The rebases that followed
 	// must not move the date, or inbox wait would fire for each of them.
 	first := 0
-	for i := 1; i < len(s.Versions) && s.Versions[i].PatchIDSHA == newest.PatchIDSHA && s.Versions[i].CreatedAt.After(a.myLast); i++ {
+	for i := 1; i < len(s.Versions) && s.Versions[i].PatchIDSHA == newest.PatchIDSHA && s.Versions[i].CreatedAt.After(a.seenAt); i++ {
 		first = i
 	}
 	if (!same && first == 0) || !trusted() {
 		return a.pushedAt, true
 	}
 	at = s.Versions[first].CreatedAt
+	if at.After(a.pushedAt) {
+		at = a.pushedAt // a push of mine on top does not date them either
+	}
 	if !same {
 		return at, true
 	}
 	// The changes are the ones I saw: only a doubt keeps the push. With
 	// both doubts, the later date: the push that took my approval away,
 	// or the retarget.
-	retargeted, approvalGone := doubts(s, me, a.myLast)
+	retargeted, approvalGone := doubts(s, me, a.seenAt)
 	if retargeted.IsZero() && !approvalGone {
 		return time.Time{}, false
 	}
@@ -374,21 +418,21 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 }
 
 // doubts reads in the system notes what an unchanged patch ID does not
-// say: when the merge request was last retargeted since my last action
+// say: when the merge request was last retargeted since what I last saw
 // (the same changes now go to another branch), and whether GitLab took my
 // approval away.
-func doubts(s *mr.Snapshot, me string, myLast time.Time) (retargeted time.Time, approvalGone bool) {
+func doubts(s *mr.Snapshot, me string, seenAt time.Time) (retargeted time.Time, approvalGone bool) {
 	var approved, withdrawn, rerequested time.Time
 	for _, d := range s.Discussions {
 		for _, n := range d.Notes {
 			if !n.System {
 				continue
 			}
-			if n.CreatedAt.After(myLast) && (strings.HasPrefix(n.Body, "changed target branch") || strings.Contains(n.Body, "This merge request now targets")) {
+			if n.CreatedAt.After(seenAt) && (strings.HasPrefix(n.Body, "changed target branch") || strings.Contains(n.Body, "This merge request now targets")) {
 				retargeted = later(retargeted, n.CreatedAt)
 			}
 			// Requesting my review again removes my approval, without a note.
-			if !n.CreatedAt.After(myLast) && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
+			if !n.CreatedAt.After(seenAt) && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
 				rerequested = later(rerequested, n.CreatedAt)
 			}
 			if n.Author.Username != me {
@@ -407,7 +451,7 @@ func doubts(s *mr.Snapshot, me string, myLast time.Time) (retargeted time.Time, 
 	}
 	// I approved and did not take it back, yet I am not among the
 	// approvers: GitLab removed my approval. I know it if, between my
-	// approval and my last action, my review was requested again or a
+	// approval and what I last saw, my review was requested again or a
 	// push changed the patch I approved: I acted since without it.
 	if rerequested.After(approved) {
 		return retargeted, false
@@ -417,7 +461,7 @@ func doubts(s *mr.Snapshot, me string, myLast time.Time) (retargeted time.Time, 
 		return retargeted, true // what I approved is not known
 	}
 	knew := slices.ContainsFunc(s.Versions, func(v gitlab.Version) bool {
-		return v.CreatedAt.After(approved) && !v.CreatedAt.After(myLast) && v.PatchIDSHA != "" && v.PatchIDSHA != s.Versions[i].PatchIDSHA
+		return v.CreatedAt.After(approved) && !v.CreatedAt.After(seenAt) && v.PatchIDSHA != "" && v.PatchIDSHA != s.Versions[i].PatchIDSHA
 	})
 	return retargeted, !knew
 }
