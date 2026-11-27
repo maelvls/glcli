@@ -332,9 +332,11 @@ func (it *Item) add(reason string, at time.Time) {
 }
 
 // mentions reports whether body mentions @user: not @username, but
-// "@user." at the end of a sentence counts.
+// "@user." at the end of a sentence counts. Case is ignored, as GitLab
+// does for usernames: "@Mael.Valais" mentions mael.valais.
 func mentions(body, user string) bool {
-	tag := "@" + user
+	body = strings.ToLower(body)
+	tag := "@" + strings.ToLower(user)
 	for from := 0; ; {
 		i := strings.Index(body[from:], tag)
 		if i < 0 {
