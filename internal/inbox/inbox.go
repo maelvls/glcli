@@ -248,6 +248,9 @@ type activity struct {
 	// pushedAt is the newest push that is not mine: I do not review my
 	// own pushes, and they must not date what waits on me.
 	pushedAt time.Time
+	// mine says, for each diff version (as in Snapshot.Versions, newest
+	// first), whether I pushed it.
+	mine []bool
 }
 
 func analyse(s *mr.Snapshot, p mr.People) activity {
@@ -277,6 +280,7 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 	// of mine falls between it and the next one. A push whose note is
 	// missing counts as someone else's.
 	foreign := false
+	a.mine = make([]bool, len(s.Versions))
 	for i := len(s.Versions) - 1; i >= 0; i-- {
 		v := s.Versions[i]
 		var mine time.Time
@@ -285,6 +289,7 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 				mine = later(mine, t)
 			}
 		}
+		a.mine[i] = !mine.IsZero()
 		if mine.IsZero() {
 			a.pushedAt = v.CreatedAt
 			foreign = foreign || v.CreatedAt.After(a.myReview)
@@ -410,10 +415,23 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 	if (!same && first == 0) || !trusted() {
 		return a.pushedAt, true
 	}
-	at = s.Versions[first].CreatedAt
-	if at.After(a.pushedAt) {
-		at = a.pushedAt // a push of mine on top does not date them either
+	// Not from a push of mine either: the changes of someone else that I
+	// have not seen came before it. From the newest push before it that
+	// is not mine, then, and the oldest one with that patch ID.
+	for a.mine[first] {
+		next := first + 1
+		for next < len(s.Versions) && a.mine[next] {
+			next++
+		}
+		if next == len(s.Versions) || !s.Versions[next].CreatedAt.After(a.seenAt) {
+			break
+		}
+		first = next
+		for i := first + 1; i < len(s.Versions) && s.Versions[i].PatchIDSHA == s.Versions[first].PatchIDSHA && s.Versions[i].CreatedAt.After(a.seenAt); i++ {
+			first = i
+		}
 	}
+	at = s.Versions[first].CreatedAt
 	if !same {
 		return at, true
 	}
