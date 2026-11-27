@@ -10,7 +10,6 @@ import (
 
 	"github.com/maelvls/glcli/internal/cli"
 	"github.com/maelvls/glcli/internal/inbox"
-	"github.com/maelvls/glcli/internal/mr"
 )
 
 type inboxFlags struct {
@@ -19,6 +18,7 @@ type inboxFlags struct {
 	roles   []string
 	maxBody int
 	ignore  []string
+	include []string
 }
 
 var validRoles = []string{"review", "authored", "todo"}
@@ -35,6 +35,7 @@ func addInboxFlags(cmd *cobra.Command, f *inboxFlags) {
 	cmd.Flags().StringSliceVar(&f.roles, "role", validRoles, "Sources: review (MRs I review), authored (MRs I opened), todo (my to-do items)")
 	cmd.Flags().IntVar(&f.maxBody, "max-body-chars", 500, "Cut to-do bodies after this many characters (0: no limit)")
 	cmd.Flags().StringSliceVar(&f.ignore, "ignore-author", nil, "Usernames whose comments do not count (bots are already left out); repeatable")
+	cmd.Flags().StringSliceVar(&f.include, "include-author", nil, includeAuthorUsage)
 }
 
 type inboxResult struct {
@@ -63,10 +64,7 @@ func collectInbox(ctx context.Context, rt *cli.Runtime, f inboxFlags) (*inboxRes
 	if err != nil {
 		return nil, nil, err
 	}
-	people := mr.People{Me: me, Ignore: map[string]bool{}}
-	for _, u := range f.ignore {
-		people.Ignore[strings.TrimPrefix(u, "@")] = true
-	}
+	people := newPeople(me, f.ignore, f.include)
 	checkedAt := rt.Now().Round(0).Truncate(time.Second)
 	res, err := inbox.Collect(ctx, c, inbox.Options{
 		Host:   host,

@@ -48,10 +48,21 @@ func keepTokenOnHost(req *http.Request, via []*http.Request) error {
 
 // APIError is a non-2xx answer from GitLab.
 type APIError struct {
+	// Host is the name of the host as glab knows it (config.Host.Name),
+	// for hints that tell which host to log in to.
+	Host    string
 	Method  string
 	Path    string
 	Status  int
 	Message string
+
+	// TokenSource is where the token that was sent came from
+	// (config.Host.TokenSource): glab's config, or "$GLCLI_TOKEN" or
+	// "$GITLAB_TOKEN".
+	TokenSource string
+	// RedirectedTo is the host that answered, when a redirect left the
+	// host of the request: it was not sent the token (see keepTokenOnHost).
+	RedirectedTo string
 }
 
 func (e *APIError) Error() string {
@@ -137,7 +148,11 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 	if resp.StatusCode/100 != 2 {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, &APIError{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
+		apiErr := &APIError{Host: c.Host.Name, TokenSource: c.Host.TokenSource, Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
+		if final := resp.Request.URL.Host; final != req.URL.Host {
+			apiErr.RedirectedTo = final
+		}
+		return nil, apiErr
 	}
 	return resp, nil
 }
