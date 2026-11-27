@@ -224,6 +224,9 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 				if s.Unsettled {
 					return false, nil // a push is landing: look again next time
 				}
+				if d.AwaitsPatchID(ctx, prev, s) {
+					return false, nil // GitLab has not computed the patch ID of the push yet
+				}
 				last = s
 				events, err := d.Events(ctx, prev, s)
 				if err != nil {

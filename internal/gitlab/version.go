@@ -38,21 +38,36 @@ func ServerVersion(ctx context.Context, c *Client) (major, minor int, err error)
 // answer only decides whether its patch IDs are trusted.
 const VersionTimeout = 5 * time.Second
 
+// versionRefused remembers the hosts that will not say their version: see
+// PatchIDsTrusted.
+var versionRefused sync.Map
+
 // PatchIDsTrusted reports whether the patch IDs of this GitLab (the
-// patch_id_sha of a diff version) tell a rebase from a change. Before
-// 18.2 they could be computed with git patch-id --stable, which ignores
-// whitespace: re-indenting a block kept the patch ID. From 18.2 on it is
-// git patch-id --verbatim. Any doubt (the version cannot be asked, or
-// read) is false, and never an error.
+// patch_id_sha of a diff version) tell a rebase from a change. They were
+// computed with git patch-id --stable, which ignores whitespace, so that
+// re-indenting a block kept the patch ID; Gitaly computes them with
+// git patch-id --verbatim from 18.1 on (behind a feature flag in 18.0).
+// They are trusted from 18.2 on: one version of margin. Any doubt (the
+// version cannot be asked, or read) is false, and never an error.
 //
 // GitLab is given bound to answer, however much is left of ctx: a GitLab
 // slow to say its version must not hold back, or time out, the command
 // that asks. The version is asked once per process and host (see
-// ServerVersion); a failed or expired request is not remembered, and is
-// asked again at the next call.
+// ServerVersion). So is a refusal: an answer that will not change by
+// asking again (403, 404, a body that is not JSON) is remembered for as
+// long as the process lives. A failure that may pass (5xx, 429, no
+// answer within bound, network down) is not, and the next call asks
+// again: callers that poll space their calls.
 func PatchIDsTrusted(ctx context.Context, c *Client, bound time.Duration) bool {
-	ctx, cancel := context.WithTimeout(ctx, bound)
+	if _, refused := versionRefused.Load(c.Host.Name); refused {
+		return false
+	}
+	bounded, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
-	major, minor, err := ServerVersion(ctx, c)
+	major, minor, err := ServerVersion(bounded, c)
+	// Not when the caller gave up: that says nothing of GitLab.
+	if err != nil && ctx.Err() == nil && !IsTransient(err) {
+		versionRefused.Store(c.Host.Name, true)
+	}
 	return err == nil && (major > 18 || major == 18 && minor >= 2)
 }
