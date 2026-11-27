@@ -268,7 +268,11 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 			if n.System && strings.HasPrefix(n.Body, "approved this merge request") {
 				a.approvedAt = later(a.approvedAt, n.CreatedAt)
 			}
-			if n.System && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
+			// Not when the note is mine: GitLab writes it under my name
+			// when I review without being a reviewer, before the note of
+			// the review (UpdateReviewerStateService#resolve_reviewer), and
+			// the "approved" note comes later, from a worker.
+			if n.System && n.Author.Username != me && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
 				a.reviewReqAt = later(a.reviewReqAt, n.CreatedAt)
 			}
 		}
