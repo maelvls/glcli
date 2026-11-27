@@ -82,6 +82,9 @@ type pipelineTarget struct {
 	// unconfirmed is the head pipeline of the merge request when id is 0
 	// and GitLab cannot tell whether it ran on sha (see pipeline.Found).
 	unconfirmed int
+	// unchecked is how many pipelines could not be checked for sha, when
+	// id is 0.
+	unchecked int
 }
 
 func openPipeline(rt *cli.Runtime, arg string) (*pipelineTarget, error) {
@@ -116,7 +119,7 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 	if err != nil {
 		return err
 	}
-	t.id, t.sha, t.head, t.unconfirmed = found.ID, found.SHA, found.Head, found.Unconfirmed
+	t.id, t.sha, t.head, t.unconfirmed, t.unchecked = found.ID, found.SHA, found.Head, found.Unconfirmed, found.Unchecked
 	return nil
 }
 
@@ -124,7 +127,10 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 // told. A --sha that is not the head gets no pipeline later: either none
 // ran on it, or it was not found.
 func (t *pipelineTarget) noPipelineHint() string {
-	if t.sha != t.head {
+	switch {
+	case t.sha != t.head && t.unchecked > 0:
+		return fmt.Sprintf("No pipeline was found for %s, which is not the head commit (%s) of this merge request. Of its 20 most recent pipelines, %d could not be checked (their merge commit cannot be read, HTTP 404) and the others ran on other commits: check that it is a commit of this merge request. Older pipelines are not looked at.", t.sha, t.head, t.unchecked)
+	case t.sha != t.head:
 		return fmt.Sprintf("None of the 20 most recent pipelines of this merge request ran on %s, which is not its head commit (%s): check that it is a commit of this merge request. Older pipelines are not looked at.", t.sha, t.head)
 	}
 	return "The likely causes: " + noPipelineCauses + "."
@@ -281,33 +287,31 @@ pipeline), 1 on error, 130 when interrupted.`,
 				createSHA   string
 				createSince time.Time
 				noPipeline  bool
-				// GitLab has not answered since outageSince.
-				outageSince time.Time
+				// answered is when GitLab last answered, and failing is
+				// true when it has failed since.
+				answered time.Time
+				failing  bool
 				// unconfirmed is true when the pipeline waited on is the
 				// head pipeline, which GitLab cannot tie to the commit.
 				unconfirmed bool
 			)
 			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
 				if err := t.resolve(ctx, f.sha); err != nil {
-					if outageSince.IsZero() {
-						outageSince = rt.Now().Round(0)
-					}
+					failing = true
 					return false, err
 				}
-				if !outageSince.IsZero() {
-					// GitLab creates pipelines late after an outage: the
-					// time it did not answer is not counted in
-					// --create-timeout.
-					if !createSince.IsZero() {
-						createSince = createSince.Add(rt.Now().Round(0).Sub(outageSince))
-					}
-					outageSince = time.Time{}
+				// The wall clock, as in Poll: GitLab kept working while
+				// this machine slept.
+				now := rt.Now().Round(0)
+				if failing && !createSince.IsZero() {
+					// GitLab creates pipelines late after an outage: only
+					// the time between two answers in a row is counted in
+					// --create-timeout, not the time since the last answer
+					// before a failure.
+					createSince = createSince.Add(now.Sub(answered))
 				}
+				answered, failing = now, false
 				if t.id == 0 {
-					// The wall clock, as in Poll: GitLab kept working while
-					// this machine slept, and it has just answered that
-					// there is still no pipeline.
-					now := rt.Now().Round(0)
 					if createSince.IsZero() || createSHA != t.sha {
 						createSHA, createSince = t.sha, now
 						if createTimeout > 0 {
@@ -369,7 +373,12 @@ pipeline), 1 on error, 130 when interrupted.`,
 				if t.unconfirmed != 0 {
 					rt.Warnf("%s", unconfirmedWarning(t.unconfirmed, t.sha))
 				}
-				rt.Hintf("No pipeline was created for %s within %s (--timeout): run the same command again to keep waiting for it.", t.sha, w.timeout)
+				if t.sha == "" {
+					// Not even the merge request was read.
+					rt.Hintf("GitLab could not be reached within %s (--timeout): run the same command again.", w.timeout)
+				} else {
+					rt.Hintf("No pipeline was created for %s within %s (--timeout): run the same command again to keep waiting for it.", t.sha, w.timeout)
+				}
 				return rt.Print(pipelineResult{Report: &pipeline.Report{Running: true}, SHA: t.sha, TimedOut: true}, "failed_jobs")
 			}
 			if unconfirmed {

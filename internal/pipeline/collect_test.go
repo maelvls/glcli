@@ -163,7 +163,7 @@ func TestForMRWithoutPipelineForTheCommit(t *testing.T) {
 	// No pipeline ran on this commit, and the commit of pipeline 80
 	// cannot be read (404): that is not an error.
 	got, err := ForMR(context.Background(), f.client(t), testMR, "dddd3333")
-	if want := (Found{SHA: "dddd3333", Head: headSHA}); err != nil || got != want {
+	if want := (Found{SHA: "dddd3333", Head: headSHA, Unchecked: 1}); err != nil || got != want {
 		t.Errorf("ForMR = %+v, %v; want %+v and no error", got, err, want)
 	}
 }
@@ -362,9 +362,11 @@ func TestForMRHeadPipelineOnAnUnreadableMergeCommit(t *testing.T) {
 		delete(f.routes, "projects/5/repository/commits/m95")
 		return f
 	}
-	for _, sha := range []string{"", headSHA[:8]} {
+	// With --sha, the pipelines listed are looked into as well: the
+	// merge commit of pipeline 80 cannot be read either.
+	for sha, unchecked := range map[string]int{"": 1, headSHA[:8]: 2} {
 		got, err := ForMR(context.Background(), unreadable().client(t), testMR, sha)
-		if want := (Found{SHA: headSHA, Unconfirmed: 95, Head: headSHA}); err != nil || got != want {
+		if want := (Found{SHA: headSHA, Unconfirmed: 95, Head: headSHA, Unchecked: unchecked}); err != nil || got != want {
 			t.Errorf("ForMR(%q) = %+v, %v; want %+v", sha, got, err, want)
 		}
 	}
@@ -373,8 +375,9 @@ func TestForMRHeadPipelineOnAnUnreadableMergeCommit(t *testing.T) {
 	if want := (Found{ID: 93, SHA: oldSHA, Head: headSHA}); err != nil || got != want {
 		t.Errorf("ForMR(old) = %+v, %v; want %+v", got, err, want)
 	}
+	// Pipelines 95 and 80 may or may not have run on this commit.
 	got, err = ForMR(context.Background(), unreadable().client(t), testMR, "dddd3333")
-	if want := (Found{SHA: "dddd3333", Head: headSHA}); err != nil || got != want {
+	if want := (Found{SHA: "dddd3333", Head: headSHA, Unchecked: 2}); err != nil || got != want {
 		t.Errorf("ForMR(unknown) = %+v, %v; want %+v", got, err, want)
 	}
 }

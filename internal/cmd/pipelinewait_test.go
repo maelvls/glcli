@@ -672,16 +672,17 @@ func TestPipelineWaitCreateTimeoutEndsAfterAnOutage(t *testing.T) {
 }
 
 // The machine sleeps for two hours: GitLab had all that time to create
-// the pipeline, so its first answer after the sleep settles it, even when
-// the network is not back yet at the first try.
+// the pipeline, so its first answer after the sleep settles it. When the
+// first request after the sleep fails, that cannot be told from an outage
+// of GitLab: the two hours are not counted, and the period goes on.
 func TestPipelineWaitSleepCountsInCreateTimeout(t *testing.T) {
 	for _, tt := range []struct {
-		name         string
-		networkLate  bool
-		wantRequests int
+		name        string
+		networkLate bool
+		settled     bool
 	}{
-		{"network back at once", false, 2},
-		{"network back at the second try", true, 3},
+		{"network back at once", false, true},
+		{"network back at the second try", true, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var e *waitEnv
@@ -702,8 +703,9 @@ func TestPipelineWaitSleepCountsInCreateTimeout(t *testing.T) {
 			if code != 0 || string(out["no_pipeline"]) != "true" {
 				t.Fatalf("exit %d, want no_pipeline, got %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
 			}
-			if n := e.count(waitMR); n != tt.wantRequests {
-				t.Errorf("the merge request was read %d times, want %d: the sleep counts", n, tt.wantRequests)
+			// Settled: by the answer after the sleep, the second.
+			if n := e.count(waitMR); (n == 2) != tt.settled {
+				t.Errorf("the merge request was read %d times; settled by the answer after the sleep: want %v", n, tt.settled)
 			}
 		})
 	}
@@ -833,6 +835,37 @@ func TestPipelineWaitMergeCommitBecomesReadable(t *testing.T) {
 	}
 	if waited := e.clock.peek().Sub(start); waited >= 10*time.Minute {
 		t.Errorf("waited %s: until --create-timeout, although the commit was readable after 1m", waited)
+	}
+}
+
+// The merge commit becomes readable after --create-timeout, while the
+// unconfirmed pipeline is already waited on: it is confirmed then, and
+// the result has no warning.
+func TestPipelineWaitMergeCommitBecomesReadableWhileWaiting(t *testing.T) {
+	var (
+		e     *waitEnv
+		start time.Time
+	)
+	e = newWaitEnv(t, mergedResultsPipeline(
+		func() string {
+			if e.clock.peek().Sub(start) < 5*time.Minute {
+				return "running"
+			}
+			return "success"
+		},
+		func() bool { return e.clock.peek().Sub(start) >= 3*time.Minute },
+	))
+	start = e.clock.peek()
+	code, out := e.wait(t, "--create-timeout", "1m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	if !strings.Contains(e.stderr.String(), "cannot confirm that pipeline 7 is the pipeline of aaa111") {
+		t.Fatalf("the test must have waited on the unconfirmed pipeline first (stderr: %s)", e.stderr.String())
+	}
+	id, status, warnings, _ := printed(t, e, out)
+	if id != 7 || status != "success" || len(warnings) != 0 {
+		t.Errorf("want the pipeline 7, success, without a warning, got %s", e.stdout.String())
 	}
 }
 
@@ -973,5 +1006,115 @@ func TestPipelineWaitNoteForANewPipeline(t *testing.T) {
 				t.Errorf("stderr: %q, want %q", e.stderr.String(), tt.want)
 			}
 		})
+	}
+}
+
+// An outage of GitLab starts just before --create-timeout would end: the
+// time between the last answer and the first failed request is part of
+// the outage, not time GitLab had to create the pipeline.
+func TestPipelineWaitOutageAtTheEndOfCreateTimeout(t *testing.T) {
+	// The fake fails from 1m to 6m, then answers "no pipeline" once, then
+	// has the pipeline. It tells when it last answered before failing, and
+	// when it first failed.
+	type timeline struct{ first, last, failed, after time.Time }
+	scenario := func(tl *timeline) *waitEnv {
+		var (
+			e     *waitEnv
+			start time.Time
+		)
+		created := onePipeline(func() string { return "success" })
+		e = newWaitEnv(t, func(path string) (string, int) {
+			now := e.clock.peek()
+			switch since := now.Sub(start); {
+			case since < time.Minute:
+				if tl.first.IsZero() {
+					tl.first = now
+				}
+				tl.last = now
+				return noPipelineAnswers(path)
+			case since < 6*time.Minute:
+				if tl.failed.IsZero() {
+					tl.failed = now
+				}
+				return outage, 500
+			}
+			if tl.after.IsZero() || tl.after.Equal(now) {
+				tl.after = now
+				return noPipelineAnswers(path)
+			}
+			return created(path)
+		})
+		start = e.clock.peek()
+		return e
+	}
+	// A first run to learn the timeline, which does not depend on
+	// --create-timeout as long as that does not end the wait.
+	var tl timeline
+	e := scenario(&tl)
+	if code, out := e.wait(t, "--create-timeout", "1h"); code != 0 || out["no_pipeline"] != nil {
+		t.Fatalf("exit %d, %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
+	}
+	answered, untilFailure := tl.last.Sub(tl.first), tl.failed.Sub(tl.first)
+	if answered <= 0 || untilFailure <= answered {
+		t.Fatalf("timeline: answers over %s, first failure after %s", answered, untilFailure)
+	}
+	// A period longer than the time covered by answers, and shorter than
+	// the time until the first failed request.
+	period := answered + (untilFailure-answered)/2
+	var again timeline
+	e = scenario(&again)
+	code, out := e.wait(t, "--create-timeout", period.String())
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	id, status, _, _ := printed(t, e, out)
+	if _, ok := out["no_pipeline"]; ok || id != 7 || status != "success" {
+		t.Errorf("--create-timeout %s, answers over %s, first failure after %s: want the pipeline 7, created after the outage, got %s", period, answered, untilFailure, e.stdout.String())
+	}
+}
+
+// A --sha that matches nothing, while the merge commit of a listed
+// pipeline cannot be read: the hint does not claim that no pipeline ran
+// on the commit.
+func TestPipelineShaWithPipelinesThatCannotBeChecked(t *testing.T) {
+	for _, args := range [][]string{
+		{"pipeline", "get", "group/project!1", "--sha", "1234567"},
+		{"pipeline", "wait", "group/project!1", "--interval", "5s", "--sha", "1234567", "--create-timeout", "1m"},
+	} {
+		t.Run(args[1], func(t *testing.T) {
+			e := newWaitEnv(t, with(longSHA, map[string]func() (string, int){
+				waitMR + "/pipelines": func() (string, int) {
+					return `[{"id":7,"sha":"abcdef1234","ref":"refs/merge-requests/1/head","status":"success"},
+						{"id":6,"sha":"gone000006","ref":"refs/merge-requests/1/merge","status":"success"},
+						{"id":5,"sha":"gone000005","ref":"refs/merge-requests/1/train","status":"success"},
+						{"id":4,"sha":"fedcba4321","ref":"refs/merge-requests/1/head","status":"success"}]`, 200
+				},
+			}))
+			code, out := e.run(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+			}
+			_, _, _, hints := printed(t, e, out)
+			if len(hints) != 1 || !strings.Contains(hints[0], "2 could not be checked") || strings.Contains(hints[0], "None of the 20") || strings.Contains(hints[0], "skip ci") {
+				t.Errorf("want a hint that 2 pipelines could not be checked, got %s", e.stdout.String())
+			}
+		})
+	}
+}
+
+// GitLab never answers before --timeout: there is no commit to name, and
+// nothing is known of its pipeline.
+func TestPipelineWaitTimeoutWhenGitLabNeverAnswers(t *testing.T) {
+	e := newWaitEnv(t, func(string) (string, int) { return outage, 500 })
+	code, out := e.wait(t, "--timeout", "1m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	_, _, _, hints := printed(t, e, out)
+	if len(hints) != 1 || !strings.Contains(hints[0], "GitLab could not be reached within 1m0s") || strings.Contains(hints[0], "No pipeline was created") {
+		t.Errorf("want a hint that GitLab could not be reached, got %s", e.stdout.String())
+	}
+	if _, ok := out["sha"]; ok || string(out["timed_out"]) != "true" || string(out["running"]) != "true" {
+		t.Errorf("want timed_out, running and no sha, got %s", e.stdout.String())
 	}
 }

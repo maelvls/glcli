@@ -284,6 +284,10 @@ type Found struct {
 	// runs on a merged-results or merge-train commit that cannot be read
 	// (HTTP 404), so its parents could not be checked.
 	Unconfirmed int
+	// Unchecked is, when ID is 0, how many of the pipelines looked at
+	// may or may not have run on SHA: their merge commit cannot be read
+	// (HTTP 404).
+	Unchecked int
 }
 
 // ForMR finds the pipeline of a merge request for the commit sha (full or
@@ -304,7 +308,7 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 		sha = m.SHA
 	}
 	found := Found{SHA: sha, Head: m.SHA}
-	unconfirmed := 0
+	unconfirmed, unchecked := 0, 0
 	hp := m.HeadPipeline
 	if hp != nil {
 		on, err := mr.PipelineOnCommit(ctx, c, m, *hp, sha)
@@ -315,8 +319,11 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 			found.ID = hp.ID
 			return found, nil
 		}
-		if on == mr.OnCommitUnknown && head {
-			unconfirmed = hp.ID
+		if on == mr.OnCommitUnknown {
+			unchecked++
+			if head {
+				unconfirmed = hp.ID
+			}
 		}
 	}
 	var list []gitlab.PipelineRef
@@ -342,12 +349,15 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 		if err != nil {
 			return found, err
 		}
-		if on == mr.OnCommitYes {
+		switch on {
+		case mr.OnCommitYes:
 			found.ID = p.ID
+		case mr.OnCommitUnknown:
+			unchecked++
 		}
 	}
 	if found.ID == 0 {
-		found.Unconfirmed = unconfirmed
+		found.Unconfirmed, found.Unchecked = unconfirmed, unchecked
 	}
 	return found, nil
 }
