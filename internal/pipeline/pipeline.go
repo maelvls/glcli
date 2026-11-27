@@ -88,15 +88,66 @@ type Options struct {
 	// StatusOnly reads no jobs, only the status of each pipeline: what
 	// "pipeline wait" needs at each poll.
 	StatusOnly bool
+	// Memory is shared by the calls made for one "pipeline wait"; nil
+	// for a single report.
+	Memory *Memory
+}
+
+// Memory is what the calls of Collect made for one wait remember: the
+// requests GitLab answered. When it refuses one of them later (Denied),
+// that is an error, not a pipeline the report can do without: the
+// session of the token expired, a membership or a visibility changed, a
+// proxy answered in GitLab's place. A report made of what is left would
+// know less than the polls before it, and could end the wait on a tree
+// that still runs.
+type Memory struct {
+	// read has the API paths GitLab answered, with the pipeline each
+	// belongs to.
+	read map[string]Summary
+}
+
+// NewMemory returns the memory of one wait.
+func NewMemory() *Memory {
+	return &Memory{read: map[string]Summary{}}
+}
+
+// answered notes that GitLab answered for path, which is of the pipeline p.
+func (m *Memory) answered(path string, p Summary) {
+	if m != nil {
+		m.read[path] = p
+	}
+}
+
+// lost returns the error to stop on when err is GitLab refusing path
+// after having answered for it earlier in the wait, and nil otherwise.
+// The error is not Denied: nothing can be done without that pipeline.
+func (m *Memory) lost(path string, err error) error {
+	if m == nil || !Denied(err) {
+		return nil
+	}
+	p, ok := m.read[path]
+	if !ok {
+		return nil
+	}
+	name := fmt.Sprintf("pipeline %d (in %s)", p.ID, p.Project)
+	if p.Parent != 0 {
+		name = "the downstream " + name
+	}
+	return fmt.Errorf("%s could be read earlier in this wait and no longer can be: %v", name, err)
 }
 
 // Collect reports on pipeline id of project (a path or numeric ID).
 func Collect(ctx context.Context, c *gitlab.Client, project string, id int, o Options) (*Report, error) {
 	var p gitlab.Pipeline
-	if err := c.Get(ctx, gitlab.Project(project)+"/pipelines/"+strconv.Itoa(id), nil, &p); err != nil {
+	path := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id)
+	if err := c.Get(ctx, path, nil, &p); err != nil {
+		if lost := o.Memory.lost(path, err); lost != nil {
+			return nil, lost
+		}
 		return nil, err
 	}
 	r := &Report{Pipeline: summary(p.PipelineRef, project)}
+	o.Memory.answered(path, r.Pipeline)
 	root := node{Summary: r.Pipeline, at: -1, api: project, shown: project}
 	if _, err := strconv.Atoi(project); err == nil {
 		// Named by its ID, as the fork of a merge request is: the failed
@@ -159,7 +210,8 @@ type node struct {
 // jobs of its parent; it is not followed further, it is marked Unreadable
 // and a warning says what is missing. The same refusal for the pipeline
 // the report is about (depth 0) is an error, as is any other error for
-// any pipeline.
+// any pipeline, and a refusal of what GitLab showed earlier in the same
+// wait (see Memory).
 func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) error {
 	id, depth := n.ID, n.Depth
 	base := gitlab.Project(n.api) + "/pipelines/" + strconv.Itoa(id)
@@ -167,19 +219,28 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) e
 		missing []string
 		denied  error
 	)
-	// refused notes what GitLab refuses to show of a downstream pipeline.
-	refused := func(err error, what string) bool {
-		if depth == 0 || !Denied(err) {
-			return false
+	// answer takes GitLab's answer for path, which is of this pipeline,
+	// and returns the error to stop on. A refusal that the report can do
+	// without is noted instead, with what the report then lacks.
+	answer := func(path string, err error, lacks string) error {
+		if err == nil {
+			o.Memory.answered(path, n.Summary)
+			return nil
 		}
-		missing = append(missing, what)
+		if lost := o.Memory.lost(path, err); lost != nil {
+			return lost
+		}
+		if depth == 0 || !Denied(err) {
+			return err
+		}
+		missing = append(missing, lacks)
 		if denied == nil {
 			denied = err
 		}
-		return true
+		return nil
 	}
 	if !o.StatusOnly {
-		if err := failedJobs(ctx, c, r, n, o); err != nil && !refused(err, missingJobs) {
+		if err := answer(base+"/jobs", failedJobs(ctx, c, r, n, base+"/jobs", o), missingJobs); err != nil {
 			return err
 		}
 	}
@@ -190,7 +251,7 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) e
 			err       error
 		)
 		bridges, truncated, err = gitlab.GetAll[gitlab.Bridge](ctx, c, base+"/bridges", nil, 5)
-		if err != nil && !refused(err, missingDownstream) {
+		if err = answer(base+"/bridges", err, missingDownstream); err != nil {
 			return err
 		}
 		r.Truncated = r.Truncated || truncated
@@ -252,12 +313,11 @@ func unreadable(p Summary, missing []string, err error) string {
 		p.ID, p.Project, p.Bridge, p.Parent, err, p.Status, lacking(p, missing))
 }
 
-// failedJobs adds the failed jobs of one pipeline to r. GitLab is asked
+// failedJobs adds the failed jobs of one pipeline, listed at path, to r. GitLab is asked
 // for these only (scope[]=failed): a pipeline can have a thousand jobs. A
 // job that failed and was retried is not among them: without
 // include_retried, GitLab lists the latest run of each job.
-func failedJobs(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) error {
-	path := gitlab.Project(n.api) + "/pipelines/" + strconv.Itoa(n.ID) + "/jobs"
+func failedJobs(ctx context.Context, c *gitlab.Client, r *Report, n node, path string, o Options) error {
 	jobs, truncated, err := gitlab.GetAll[gitlab.Job](ctx, c, path, url.Values{"scope[]": {"failed"}}, 10)
 	if err != nil {
 		return err

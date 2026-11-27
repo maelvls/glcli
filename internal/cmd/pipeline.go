@@ -299,9 +299,13 @@ pipeline), 1 on error, 130 when interrupted.`,
 			if err != nil {
 				return err
 			}
+			// What GitLab showed of a pipeline during this wait and refuses
+			// later is an error: see pipeline.Memory.
+			whole := f.options()
+			whole.Memory = pipeline.NewMemory()
 			// While the pipelines run, a poll reads their statuses and no
 			// jobs: the failed jobs and their logs are read once, at the end.
-			statusOnly := f.options()
+			statusOnly := whole
 			statusOnly.StatusOnly = true
 			var (
 				// last is the latest report of the pipeline lastID: nil
@@ -383,7 +387,7 @@ pipeline), 1 on error, 130 when interrupted.`,
 				if r.Running {
 					return false, nil
 				}
-				if r, err = t.collect(ctx, f.options()); err != nil {
+				if r, err = t.collect(ctx, whole); err != nil {
 					return false, err
 				}
 				last = r
@@ -414,8 +418,18 @@ pipeline), 1 on error, 130 when interrupted.`,
 			}
 			if timedOut {
 				// The current state, with the jobs that have failed so far.
-				r, err := t.collect(ctx, f.options())
+				r, err := t.collect(ctx, whole)
 				switch {
+				case err == nil && !r.Running && r.Partial() && last != nil && last.Running && !last.Partial():
+					// The polls read the whole tree, and it was running. This
+					// read lacks part of it (a pipeline that appeared since,
+					// and cannot be read): it cannot tell that the tree has
+					// finished, so the result stays what the last poll saw,
+					// timed out.
+					for _, warning := range r.Warnings {
+						rt.Warnf("%s", warning)
+					}
+					rt.Hintf("The pipeline was still running at the last poll, and part of it could not be read when the wait ended after %s (--timeout): run the same command again.", w.timeout)
 				case err == nil:
 					// It may have finished just now.
 					last, timedOut = r, r.Running
