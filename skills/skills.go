@@ -3,6 +3,7 @@
 package skills
 
 import (
+	"bytes"
 	"embed"
 	"errors"
 	"fmt"
@@ -25,11 +26,57 @@ type Skill struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Files       []string `json:"files"`
+	// Installed, Symlink and Error are only set by Compare. Installed is
+	// absent, identical, differs or unreadable.
+	Installed string `json:"installed,omitempty"`
+	// Symlink is where the installed skill points to when it is a symlink.
+	Symlink string `json:"symlink,omitempty"`
+	// Error says why the installed skill is unreadable.
+	Error string `json:"error,omitempty"`
 }
 
 // List returns the embedded skills, sorted by name.
 func List() ([]Skill, error) {
 	return list(FS)
+}
+
+// Compare returns the embedded skills and, for each, how the skill of the
+// same name in the skills directory dir compares with it (see sameFiles).
+// It only reads: this is the check that an installed skill is this
+// binary's, so it must be safe to run anywhere, and dir is not created.
+func Compare(dir string) ([]Skill, error) {
+	return compare(FS, dir)
+}
+
+func compare(fsys fs.FS, dir string) ([]Skill, error) {
+	all, err := list(fsys)
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		s := &all[i]
+		dest := filepath.Join(dir, s.Name)
+		info, err := os.Lstat(dest)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			s.Installed = "absent"
+			continue
+		case err != nil:
+			s.Installed, s.Error = "unreadable", err.Error()
+			continue
+		case info.Mode()&fs.ModeSymlink != 0:
+			s.Symlink, _ = os.Readlink(dest)
+		}
+		switch same, err := sameFiles(fsys, s.Name, dest); {
+		case err != nil:
+			s.Installed, s.Error = "unreadable", err.Error()
+		case same:
+			s.Installed = "identical"
+		default:
+			s.Installed = "differs"
+		}
+	}
+	return all, nil
 }
 
 func list(fsys fs.FS) ([]Skill, error) {
@@ -84,8 +131,15 @@ type Result struct {
 	Path string `json:"path"`
 	// Status is installed, replaced (--overwrite), or skipped.
 	Status string `json:"status"`
-	// Reason says why a skill was skipped.
+	// Reason says why a skill was skipped, and whether what is installed is
+	// identical to the embedded skill.
 	Reason string `json:"reason,omitempty"`
+	// Differs is set on a skipped skill whose installed files are not the
+	// embedded ones: it comes from another version of glcli, or was edited.
+	Differs bool `json:"differs,omitempty"`
+	// Symlink is set on a skill skipped because it is a symlink, which
+	// overwrite does not replace.
+	Symlink bool `json:"-"`
 }
 
 // Install writes the embedded skills into dir, one directory per skill.
@@ -93,6 +147,10 @@ type Result struct {
 // a symlink (a checkout used for development) is always left alone. Each
 // skill is written to a temporary directory first and then moved in, so a
 // failure never leaves half a skill behind.
+//
+// A skill that is left alone is compared with the embedded one, so that
+// the result tells whether the installed skill is this binary's without
+// anything being written, neither a stamp nor a version file.
 func Install(dir string, overwrite bool) ([]Result, error) {
 	return install(FS, dir, overwrite)
 }
@@ -116,11 +174,27 @@ func install(fsys fs.FS, dir string, overwrite bool) ([]Result, error) {
 			return results, err
 		case info.Mode()&fs.ModeSymlink != 0:
 			target, _ := os.Readlink(dest)
-			r.Status, r.Reason = "skipped", "a symlink to "+target+" (left alone: remove it to install a copy)"
+			r.Status, r.Symlink = "skipped", true
+			compared := ""
+			// A symlink that cannot be followed keeps the plain reason.
+			if same, err := sameFiles(fsys, s.Name, dest); err == nil && same {
+				compared = ", identical to this glcli's"
+			} else if err == nil {
+				compared, r.Differs = ", which differs from this glcli's", true
+			}
+			r.Reason = "a symlink to " + target + compared + " (left alone: remove it to install a copy)"
 			results = append(results, r)
 			continue
 		case !overwrite:
-			r.Status, r.Reason = "skipped", "already installed: pass --overwrite to replace it"
+			r.Status = "skipped"
+			switch same, err := sameFiles(fsys, s.Name, dest); {
+			case err != nil:
+				r.Reason = "already installed, could not be compared with this glcli's (" + err.Error() + "): pass --overwrite to replace it"
+			case same:
+				r.Reason = "already installed, identical to this glcli's"
+			default:
+				r.Reason, r.Differs = "already installed, differs from this glcli's: pass --overwrite to replace it", true
+			}
 			results = append(results, r)
 			continue
 		default:
@@ -132,6 +206,55 @@ func install(fsys fs.FS, dir string, overwrite bool) ([]Result, error) {
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// sameFiles reports whether the directory dest holds the files of the
+// embedded skill name and nothing else: same paths, same bytes. File modes
+// and empty directories do not count.
+func sameFiles(fsys fs.FS, name, dest string) (bool, error) {
+	embedded, err := fs.Sub(fsys, name)
+	if err != nil {
+		return false, err
+	}
+	want, err := readFiles(embedded)
+	if err != nil {
+		return false, err
+	}
+	// Checked first because os.DirFS calls dest "." in its errors.
+	if info, err := os.Stat(dest); err != nil {
+		return false, err
+	} else if !info.IsDir() {
+		return false, fmt.Errorf("%s is not a directory", dest)
+	}
+	// os.DirFS follows dest when it is a symlink.
+	got, err := readFiles(os.DirFS(dest))
+	if err != nil {
+		return false, err
+	}
+	if len(got) != len(want) {
+		return false, nil
+	}
+	for p, data := range want {
+		if installed, ok := got[p]; !ok || !bytes.Equal(installed, data) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// readFiles returns the content of every file of fsys by path. A skill is
+// a few small text files.
+func readFiles(fsys fs.FS) (map[string][]byte, error) {
+	files := map[string][]byte{}
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(fsys, p)
+		files[p] = data
+		return err
+	})
+	return files, err
 }
 
 func writeSkill(fsys fs.FS, name, dir, dest string) error {

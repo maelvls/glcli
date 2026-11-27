@@ -45,6 +45,8 @@ glcli skills install    # the agent skill, embedded in the binary, into ~/.claud
 After upgrading, `glcli skills install --overwrite` updates the skill.
 `--dir` installs it elsewhere (a project's `.claude/skills`, another
 agent's skills directory). From a checkout, `make install` does both steps.
+`glcli version` tells which glcli is installed (and from which commit, for
+a build from a checkout).
 
 To have the skill follow a checkout instead of a copy (`skills install`
 then leaves the symlink alone):
