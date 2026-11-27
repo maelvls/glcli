@@ -606,3 +606,138 @@ func TestPipelineWaitRetriesTheFinalRead(t *testing.T) {
 		t.Errorf("the jobs were asked for %d times, want 2: the failure, then the retry", asked)
 	}
 }
+
+// add moves the clock forward: the machine slept.
+func (c *stepClock) add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// GitLab fails for longer than --create-timeout while the pipeline is
+// awaited, and creates it late once it answers again: the outage is not
+// counted, and the pipeline is waited for.
+func TestPipelineWaitOutageDoesNotCountInCreateTimeout(t *testing.T) {
+	var (
+		e     *waitEnv
+		start time.Time
+	)
+	created := onePipeline(func() string { return "success" })
+	e = newWaitEnv(t, func(path string) (string, int) {
+		switch since := e.clock.peek().Sub(start); {
+		case since < 30*time.Second:
+			return noPipelineAnswers(path)
+		case since < 6*time.Minute:
+			return outage, 500
+		case since < 6*time.Minute+40*time.Second:
+			return noPipelineAnswers(path)
+		}
+		return created(path)
+	})
+	start = e.clock.peek()
+	code, out := e.wait(t, "--create-timeout", "3m")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, e.stderr.String())
+	}
+	id, status, _, _ := printed(t, e, out)
+	if _, ok := out["no_pipeline"]; ok || id != 7 || status != "success" {
+		t.Errorf("want the pipeline 7, created after the outage, got %s", e.stdout.String())
+	}
+}
+
+// The rest of --create-timeout still runs after an outage.
+func TestPipelineWaitCreateTimeoutEndsAfterAnOutage(t *testing.T) {
+	var (
+		e     *waitEnv
+		start time.Time
+	)
+	e = newWaitEnv(t, func(path string) (string, int) {
+		if since := e.clock.peek().Sub(start); since >= 30*time.Second && since < 6*time.Minute {
+			return outage, 500
+		}
+		return noPipelineAnswers(path)
+	})
+	start = e.clock.peek()
+	code, out := e.wait(t, "--create-timeout", "3m")
+	if code != 0 || string(out["no_pipeline"]) != "true" {
+		t.Fatalf("exit %d, want no_pipeline, got %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
+	}
+	// 5m30s of outage and 3m of answers, less the poll during which the
+	// outage started.
+	if waited := e.clock.peek().Sub(start); waited < 7*time.Minute+30*time.Second {
+		t.Errorf("gave up after %s: the outage was counted in --create-timeout", waited)
+	}
+}
+
+// The machine sleeps for two hours: GitLab had all that time to create
+// the pipeline, so its first answer after the sleep settles it, even when
+// the network is not back yet at the first try.
+func TestPipelineWaitSleepCountsInCreateTimeout(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		networkLate  bool
+		wantRequests int
+	}{
+		{"network back at once", false, 2},
+		{"network back at the second try", true, 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var e *waitEnv
+			asked := 0
+			e = newWaitEnv(t, func(path string) (string, int) {
+				if path == waitMR {
+					asked++
+					if asked == 2 {
+						e.clock.add(2 * time.Hour)
+					}
+					if asked == 2 && tt.networkLate {
+						return outage, 500
+					}
+				}
+				return noPipelineAnswers(path)
+			})
+			code, out := e.wait(t)
+			if code != 0 || string(out["no_pipeline"]) != "true" {
+				t.Fatalf("exit %d, want no_pipeline, got %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
+			}
+			if n := e.count(waitMR); n != tt.wantRequests {
+				t.Errorf("the merge request was read %d times, want %d: the sleep counts", n, tt.wantRequests)
+			}
+		})
+	}
+}
+
+// The pipeline is created late, runs, then is deleted: GitLab gets the
+// whole --create-timeout again, not what was left of the first wait.
+func TestPipelineWaitCreateTimeoutRestartsWhenThePipelineIsGone(t *testing.T) {
+	var (
+		e     *waitEnv
+		start time.Time
+		gone  time.Time
+	)
+	running := onePipeline(func() string { return "running" })
+	e = newWaitEnv(t, func(path string) (string, int) {
+		now := e.clock.peek()
+		switch since := now.Sub(start); {
+		case since < time.Minute:
+			return noPipelineAnswers(path)
+		case since < 4*time.Minute:
+			return running(path)
+		}
+		if gone.IsZero() {
+			gone = now
+		}
+		return noPipelineAnswers(path)
+	})
+	start = e.clock.peek()
+	code, out := e.wait(t, "--create-timeout", "2m")
+	if code != 0 || string(out["no_pipeline"]) != "true" {
+		t.Fatalf("exit %d, want no_pipeline, got %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
+	}
+	if e.count(waitPipeline) == 0 || gone.IsZero() {
+		t.Fatal("the test must have read the pipeline, then lost it")
+	}
+	if waited := e.clock.peek().Sub(gone); waited < 2*time.Minute {
+		t.Errorf("gave up %s after the pipeline was gone, before --create-timeout", waited)
+	}
+}

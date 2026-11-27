@@ -228,10 +228,24 @@ pipeline), 1 on error, 130 when interrupted.`,
 				createSHA   string
 				createSince time.Time
 				noPipeline  bool
+				// GitLab has not answered since outageSince.
+				outageSince time.Time
 			)
 			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
 				if err := t.resolve(ctx, f.sha); err != nil {
+					if outageSince.IsZero() {
+						outageSince = rt.Now().Round(0)
+					}
 					return false, err
+				}
+				if !outageSince.IsZero() {
+					// GitLab creates pipelines late after an outage: the
+					// time it did not answer is not counted in
+					// --create-timeout.
+					if !createSince.IsZero() {
+						createSince = createSince.Add(rt.Now().Round(0).Sub(outageSince))
+					}
+					outageSince = time.Time{}
 				}
 				if t.id == 0 {
 					// The wall clock, as in Poll: GitLab kept working while
