@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"sort"
 	"strings"
 
@@ -80,11 +78,24 @@ type rawConfig struct {
 	} `yaml:"hosts"`
 }
 
-// Parse parses the content of glab's config.yml.
+// Parse parses the content of glab's config.yml. Its errors name the file,
+// a line and what is wrong there, and never repeat a value or a key of the
+// file, which holds tokens. (The names of the hosts and of their users are
+// not secrets: Config.Host and `glcli auth status` do show them.)
 func Parse(data []byte, path string) (*Config, error) {
+	fail := func(msg string) (*Config, error) {
+		return nil, fmt.Errorf("reading %s: %s", path, msg)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fail(redact(err))
+	}
 	var raw rawConfig
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("reading %s: %s", path, redact(err))
+	if err := doc.Decode(&raw); err != nil {
+		if msg := diagnose(&doc); msg != "" {
+			return fail(msg)
+		}
+		return fail(redact(err))
 	}
 	// The field reported is the first bad one of the file: the hosts are
 	// visited in no fixed order.
@@ -92,7 +103,7 @@ func Parse(data []byte, path string) (*Config, error) {
 	var badField string
 	str := func(field string, n yaml.Node) string {
 		s, ok := text(&n)
-		if !ok && (bad == nil || n.Line < bad.Line) {
+		if !ok && (bad == nil || before(&n, bad)) {
 			bad, badField = &n, field
 		}
 		return s
@@ -119,7 +130,7 @@ func Parse(data []byte, path string) (*Config, error) {
 		c.Hosts[name] = host
 	}
 	if bad != nil {
-		return nil, fmt.Errorf("reading %s: line %d: %s is not a string", path, bad.Line, badField)
+		return fail(fmt.Sprintf("line %d: %s is not a string", bad.Line, badField))
 	}
 	return c, nil
 }
@@ -129,49 +140,40 @@ func Parse(data []byte, path string) (*Config, error) {
 // ("token:", "token: ~", "token: !!null") are the empty string. ok is false
 // for a list or a mapping.
 func text(n *yaml.Node) (s string, ok bool) {
-	if n.Kind == yaml.AliasNode && n.Alias != nil {
-		n = n.Alias
-	}
-	if n.IsZero() {
+	n = target(n)
+	if n.IsZero() || isNull(n) {
 		return "", true
 	}
 	if n.Kind != yaml.ScalarNode {
 		return "", false
 	}
-	if n.Tag == "!!null" {
-		switch n.Value {
-		case "~", "null", "Null", "NULL":
-			return "", true
-		}
-	}
 	return n.Value, true
 }
 
-var yamlLine = regexp.MustCompile(`^(?:yaml: )?line (\d+):`)
+// target follows an alias ("token: *t") to the node it stands for.
+func target(n *yaml.Node) *yaml.Node {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		return n.Alias
+	}
+	return n
+}
 
-// redact reduces an error of the yaml package to the lines it points at:
-// its messages quote values of the file ("cannot unmarshal !!str `glpat-…`
-// into …"), and the file holds tokens. "near", because for a syntax error
-// the line can be the one where the enclosing block starts.
-func redact(err error) string {
-	msgs := []string{err.Error()}
-	var te *yaml.TypeError
-	if errors.As(err, &te) {
-		msgs = te.Errors
+// isNull is true for a real null, and false for a text that only carries
+// the !!null tag.
+func isNull(n *yaml.Node) bool {
+	if n.Kind != yaml.ScalarNode || n.Tag != "!!null" {
+		return false
 	}
-	var lines []string
-	for _, msg := range msgs {
-		if m := yamlLine.FindStringSubmatch(msg); m != nil && !slices.Contains(lines, m[1]) {
-			lines = append(lines, m[1])
-		}
+	switch n.Value {
+	case "", "~", "null", "Null", "NULL":
+		return true
 	}
-	switch len(lines) {
-	case 0:
-		return "invalid YAML"
-	case 1:
-		return "invalid YAML near line " + lines[0]
-	}
-	return "invalid YAML near lines " + strings.Join(lines, ", ")
+	return false
+}
+
+// before says whether a comes first in the file.
+func before(a, b *yaml.Node) bool {
+	return a.Line < b.Line || a.Line == b.Line && a.Column < b.Column
 }
 
 // Default returns the name of the host to use when nothing else says:
