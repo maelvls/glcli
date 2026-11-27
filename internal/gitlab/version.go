@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // serverVersions remembers the version each host gave, for as long as the
@@ -31,4 +32,27 @@ func ServerVersion(ctx context.Context, c *Client) (major, minor int, err error)
 		return 0, 0, fmt.Errorf("GitLab %s: cannot read the version %q", c.Host.Name, v)
 	}
 	return major, minor, nil
+}
+
+// VersionTimeout is how long GitLab is given to say its version when the
+// answer only decides whether its patch IDs are trusted.
+const VersionTimeout = 5 * time.Second
+
+// PatchIDsTrusted reports whether the patch IDs of this GitLab (the
+// patch_id_sha of a diff version) tell a rebase from a change. Before
+// 18.2 they could be computed with git patch-id --stable, which ignores
+// whitespace: re-indenting a block kept the patch ID. From 18.2 on it is
+// git patch-id --verbatim. Any doubt (the version cannot be asked, or
+// read) is false, and never an error.
+//
+// GitLab is given bound to answer, however much is left of ctx: a GitLab
+// slow to say its version must not hold back, or time out, the command
+// that asks. The version is asked once per process and host (see
+// ServerVersion); a failed or expired request is not remembered, and is
+// asked again at the next call.
+func PatchIDsTrusted(ctx context.Context, c *Client, bound time.Duration) bool {
+	ctx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	major, minor, err := ServerVersion(ctx, c)
+	return err == nil && (major > 18 || major == 18 && minor >= 2)
 }

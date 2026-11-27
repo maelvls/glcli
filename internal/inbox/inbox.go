@@ -296,22 +296,18 @@ func reviewItemWith(s *mr.Snapshot, p mr.People, trusted func() bool) Item {
 }
 
 // patchIDsTrusted reports whether the patch IDs of this GitLab tell a
-// rebase from a change. Before 18.2 they could be computed with
-// git patch-id --stable, which ignores whitespace: re-indenting a block
-// kept the patch ID. Any doubt (the version cannot be asked, or read) is
-// false, and never an error.
+// rebase from a change: the rule, GitLab 18.2 or newer, is
+// gitlab.PatchIDsTrusted, which mr wait follows too. Any doubt (the
+// version cannot be asked, or read) is false, and never an error.
 func patchIDsTrusted(ctx context.Context, c *gitlab.Client) bool {
 	// Every merge request that needs the answer waits for it: a GitLab
 	// slow to give its version must not make the inbox time out.
-	ctx, cancel := context.WithTimeout(ctx, versionTimeout)
-	defer cancel()
-	major, minor, err := gitlab.ServerVersion(ctx, c)
-	return err == nil && (major > 18 || major == 18 && minor >= 2)
+	return gitlab.PatchIDsTrusted(ctx, c, versionTimeout)
 }
 
 // versionTimeout is how long GitLab is given to say its version. A
 // variable for the tests.
-var versionTimeout = 5 * time.Second
+var versionTimeout = gitlab.VersionTimeout
 
 // unseenPush reports whether the pushes since my last action left me
 // something to look at, and since when. They did not when the diff
