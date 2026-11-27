@@ -47,6 +47,14 @@ func TestNewCommitsAreAskedOnce(t *testing.T) {
 			if got := f.requests(); !slices.Contains(got, "commits base2..head3") || len(got) > 2 {
 				t.Errorf("after another push: asked %v, want its commits once", got)
 			}
+
+			// The same head seen from another cursor, on the same base:
+			// other commits are new.
+			prev.SHA, prev.Base, prev.Patch = "head0", "base2", ""
+			f.compare["head0..head3"] = `{"commits": [{"short_id": "c0", "title": "older"}, {"short_id": "c1", "title": "a commit"}]}`
+			if e := onlyPush(t, d, prev, s); len(e.Commits) != 2 {
+				t.Errorf("from another cursor: commits = %+v, want the two since head0", e.Commits)
+			}
 		})
 	}
 }
