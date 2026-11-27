@@ -494,6 +494,12 @@ type Found struct {
 	// numeric ID: the pipeline is to be read from there. Fork.Project,
 	// the path in the pipeline's web_url, is for display.
 	ForkProject string
+	// ForkHead is true when the head pipeline of the merge request
+	// belongs to another project than the merge request, its fork. GitLab
+	// leaves the pipelines of a fork the token cannot read out of the
+	// list it gives: with ID 0, a pipeline may then have run on SHA all
+	// the same.
+	ForkHead bool
 }
 
 // ForMR finds the pipeline of a merge request for the commit sha (full or
@@ -519,9 +525,12 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 	found := Found{SHA: sha, Head: m.SHA}
 	// take makes p the pipeline found. GitLab gives the project of each
 	// pipeline (project_id), in head_pipeline as in the list.
+	elsewhere := func(p gitlab.PipelineRef) bool {
+		return p.ProjectID != 0 && p.ProjectID != m.ProjectID
+	}
 	take := func(p gitlab.PipelineRef) {
 		found.ID, found.Fork, found.ForkProject = p.ID, nil, ""
-		if p.ProjectID != 0 && p.ProjectID != m.ProjectID {
+		if elsewhere(p) {
 			s := summary(p, strconv.Itoa(p.ProjectID))
 			found.Fork, found.ForkProject = &s, strconv.Itoa(p.ProjectID)
 		}
@@ -529,6 +538,7 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 	unconfirmed, unchecked := 0, 0
 	hp := m.HeadPipeline
 	if hp != nil {
+		found.ForkHead = elsewhere(*hp)
 		on, err := mr.PipelineOnCommit(ctx, c, m, *hp, sha)
 		if err != nil {
 			return found, err

@@ -50,7 +50,7 @@ func TestForMRTellsTheProjectOfAPipelineInTheFork(t *testing.T) {
 // the project of the merge request: no fork to read it from.
 func TestForMRPipelineOfAForkMergeRequestRunInTheParentProject(t *testing.T) {
 	got, err := ForMR(context.Background(), fromFork().client(t), testMR, oldSHA)
-	if want := (Found{ID: 93, SHA: oldSHA, Head: headSHA}); err != nil || got != want {
+	if want := (Found{ID: 93, SHA: oldSHA, Head: headSHA, ForkHead: true}); err != nil || got != want {
 		t.Errorf("ForMR = %+v, %v; want %+v", got, err, want)
 	}
 }
@@ -90,7 +90,20 @@ func TestForMRProjectOfTheNewestPipelineOfTheCommit(t *testing.T) {
 		{"id":90,"project_id":9,"sha":"` + oldSHA + `","ref":"feature","status":"failed"},
 		{"id":93,"project_id":5,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"success"}]`)
 	got, err = ForMR(context.Background(), f.client(t), testMR, oldSHA)
-	if want := (Found{ID: 93, SHA: oldSHA, Head: headSHA}); err != nil || got != want {
+	if want := (Found{ID: 93, SHA: oldSHA, Head: headSHA, ForkHead: true}); err != nil || got != want {
+		t.Errorf("ForMR = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+// The token cannot read the fork: GitLab gives the head pipeline, which
+// is in the fork, but leaves the fork's pipelines out of the list. No
+// pipeline is found for an older commit, and ForkHead says that this is
+// not the whole story.
+func TestForMRSaysWhenTheHeadPipelineIsInAFork(t *testing.T) {
+	f := fromFork()
+	f.routes["projects/group/project/merge_requests/1/pipelines"] = ok(`[]`)
+	got, err := ForMR(context.Background(), f.client(t), testMR, oldSHA)
+	if want := (Found{SHA: oldSHA, Head: headSHA, ForkHead: true}); err != nil || got != want {
 		t.Errorf("ForMR = %+v, %v; want %+v", got, err, want)
 	}
 }

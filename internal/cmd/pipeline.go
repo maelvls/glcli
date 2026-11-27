@@ -89,6 +89,9 @@ type pipelineTarget struct {
 	// runs in the fork the merge request comes from: project is then the
 	// numeric ID of the fork (see pipeline.Found).
 	fork *pipeline.Summary
+	// forkHead is true when the head pipeline of the merge request runs
+	// in the fork.
+	forkHead bool
 }
 
 func openPipeline(rt *cli.Runtime, arg string) (*pipelineTarget, error) {
@@ -124,6 +127,7 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 		return err
 	}
 	t.id, t.sha, t.head, t.unconfirmed, t.unchecked = found.ID, found.SHA, found.Head, found.Unconfirmed, found.Unchecked
+	t.forkHead = found.ForkHead
 	// Each pipeline has its own project: the head pipeline may be in the
 	// fork while the pipeline of an older commit ran in the parent project.
 	t.project, t.fork = t.mr.Project, found.Fork
@@ -152,11 +156,16 @@ func (t *pipelineTarget) collect(ctx context.Context, o pipeline.Options) (*pipe
 // told. A --sha that is not the head gets no pipeline later: either none
 // ran on it, or it was not found.
 func (t *pipelineTarget) noPipelineHint() string {
+	// The list of a merge request's pipelines is what was looked through.
+	fork := ""
+	if t.forkHead {
+		fork = " The head pipeline of this merge request runs in another project, the fork it comes from: GitLab does not list the pipelines of a fork that this token cannot read, so one may have run on this commit all the same."
+	}
 	switch {
 	case t.sha != t.head && t.unchecked > 0:
-		return fmt.Sprintf("No pipeline was found for %s, which is not the head commit (%s) of this merge request. Of its 20 most recent pipelines, %d could not be checked (their merge commit cannot be read, HTTP 404) and the others ran on other commits: check that it is a commit of this merge request. Older pipelines are not looked at.", t.sha, t.head, t.unchecked)
+		return fmt.Sprintf("No pipeline was found for %s, which is not the head commit (%s) of this merge request. Of its 20 most recent pipelines, %d could not be checked (their merge commit cannot be read, HTTP 404) and the others ran on other commits: check that it is a commit of this merge request. Older pipelines are not looked at.", t.sha, t.head, t.unchecked) + fork
 	case t.sha != t.head:
-		return fmt.Sprintf("None of the 20 most recent pipelines of this merge request ran on %s, which is not its head commit (%s): check that it is a commit of this merge request. Older pipelines are not looked at.", t.sha, t.head)
+		return fmt.Sprintf("None of the 20 most recent pipelines of this merge request ran on %s, which is not its head commit (%s): check that it is a commit of this merge request. Older pipelines are not looked at.", t.sha, t.head) + fork
 	}
 	return "The likely causes: " + noPipelineCauses + "."
 }
@@ -202,7 +211,8 @@ with the end of their log.
 
 The argument is a pipeline URL, or a merge request (its URL,
 group/project!123 or !123): then the pipeline of its head commit, or of
---sha.
+--sha. For a merge request opened from a fork, that pipeline is read from
+the fork, where it runs.
 
 Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
 "running" is true while any pipeline of the tree has not finished.
@@ -262,6 +272,14 @@ func newPipelineWait(rt *cli.Runtime) *cobra.Command {
 		Long: `Wait until a pipeline and its downstream pipelines have all finished
 (success, failed, canceled, skipped, or manual: waiting for someone to
 start a job), then print what "pipeline get" prints.
+
+Two exceptions, each told in "warnings" and marked "unreadable": true.
+The downstream pipelines of a downstream pipeline that the token cannot
+read are not seen, so not waited for. And when the pipeline of a merge
+request runs in a fork that the token cannot read, the wait goes by the
+status the merge request reports for that pipeline alone, not by its
+downstream pipelines. A pipeline that could be read earlier in the same
+wait and is refused later (HTTP 403 or 404) is an error: exit 1.
 
 For a merge request, it waits for the pipeline of --sha, or of the head
 commit, following the head when someone pushes during the wait; right
