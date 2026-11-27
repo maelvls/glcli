@@ -130,7 +130,7 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("PRIVATE-TOKEN", c.Host.Token)
+	authorize(req, c.Host)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "glcli")
 	start := time.Now()
@@ -155,6 +155,19 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 		return nil, apiErr
 	}
 	return resp, nil
+}
+
+// authorize puts the token of h in the header GitLab reads it from: an
+// OAuth 2.0 access token (a host glab logged in to with OAuth) goes in
+// "Authorization: Bearer", since GitLab looks for a personal, project or
+// group access token in PRIVATE-TOKEN and answers 401 to anything else
+// there. Every other token goes in PRIVATE-TOKEN, as it always did.
+func authorize(req *http.Request, h config.Host) {
+	if h.OAuth {
+		req.Header.Set("Authorization", "Bearer "+h.Token)
+		return
+	}
+	req.Header.Set("PRIVATE-TOKEN", h.Token)
 }
 
 func errorMessage(body []byte) string {

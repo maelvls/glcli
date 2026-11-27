@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,6 +25,16 @@ type Host struct {
 	User string
 	// TokenSource says where the token came from, for error messages.
 	TokenSource string
+	// OAuth says that glab logged in to this host with OAuth ("is_oauth2"
+	// is "true" in its config): Token is then an OAuth 2.0 access token,
+	// which GitLab takes in "Authorization: Bearer" and not in
+	// "PRIVATE-TOKEN", which expires, and which glab renews (glcli never
+	// does). It is false for a token that came from the environment.
+	OAuth bool
+	// Expiry is when glab's config says the OAuth access token expires
+	// ("oauth2_expiry_date"). It is zero when the config does not say, or
+	// says it in a way glcli cannot read.
+	Expiry time.Time
 }
 
 // BaseURL is the scheme and host of the instance, without a trailing slash.
@@ -68,6 +79,9 @@ func Load() (*Config, error) {
 // The scalars are kept as nodes, which are not checked against their tag:
 // glab can write "token: !!null glpat-…", and decoding that into a string
 // fails with an error that quotes the token.
+//
+// "oauth2_refresh_token", which glab writes next to the token of an OAuth
+// host, has no field here on purpose: glcli has no use for it.
 type rawConfig struct {
 	Host  yaml.Node `yaml:"host"`
 	Hosts map[string]struct {
@@ -75,6 +89,8 @@ type rawConfig struct {
 		APIProtocol yaml.Node `yaml:"api_protocol"`
 		Token       yaml.Node `yaml:"token"`
 		User        yaml.Node `yaml:"user"`
+		IsOAuth2    yaml.Node `yaml:"is_oauth2"`
+		Expiry      yaml.Node `yaml:"oauth2_expiry_date"`
 	} `yaml:"hosts"`
 }
 
@@ -108,6 +124,15 @@ func Parse(data []byte, path string) (*Config, error) {
 		}
 		return s
 	}
+	// What glab writes about its OAuth logins is read the
+	// way glab reads it: the text of the scalar, compared with "true", so
+	// that "true" in quotes (what glab writes) and the boolean true are the
+	// same. Anything else there is "no", and never an error: a file that
+	// was read before glcli looked at these keys is still read.
+	flag := func(n yaml.Node) bool {
+		s, _ := text(&n)
+		return s == "true"
+	}
 	c := &Config{Path: path, DefaultHost: str("host", raw.Host), Hosts: map[string]Host{}}
 	if c.DefaultHost == "" {
 		c.DefaultHost = "gitlab.com"
@@ -120,6 +145,11 @@ func Parse(data []byte, path string) (*Config, error) {
 			Token:       str("token", h.Token),
 			User:        str("user", h.User),
 			TokenSource: path,
+			OAuth:       flag(h.IsOAuth2),
+		}
+		if host.OAuth {
+			s, _ := text(&h.Expiry)
+			host.Expiry = parseExpiry(s)
 		}
 		if host.APIHost == "" {
 			host.APIHost = name
@@ -133,6 +163,26 @@ func Parse(data []byte, path string) (*Config, error) {
 		return fail(fmt.Sprintf("line %d: %s is not a string", bad.Line, badField))
 	}
 	return c, nil
+}
+
+// parseExpiry reads "oauth2_expiry_date" in the three layouts glab itself
+// accepts: RFC 3339, which it writes, and the two RFC 822 ones that its
+// older versions wrote. A date that cannot be read is the zero time, as
+// when there is none. An RFC 822 date with a zone name ("CET") is only
+// kept when Go knows the offset of that name on this machine: otherwise
+// Go reads it as UTC, hours away from what was meant.
+func parseExpiry(s string) time.Time {
+	for _, layout := range []string{time.RFC3339, time.RFC822, time.RFC822Z} {
+		t, err := time.Parse(layout, s)
+		if err != nil {
+			continue
+		}
+		if layout == time.RFC822 && t.Location() != time.UTC && t.Location() != time.Local {
+			return time.Time{}
+		}
+		return t
+	}
+	return time.Time{}
 }
 
 // text returns the text of a scalar whatever its tag says, so that
@@ -190,7 +240,8 @@ func (c *Config) Default() string {
 // Host returns the host called name ("" for the default one), with its
 // token. $GLCLI_TOKEN, then $GITLAB_TOKEN, replace the token of the default
 // host only, so that a token is never sent to an instance it was not meant
-// for.
+// for. A token from the environment is not an OAuth one, whatever glab's
+// config says of the host (glab does the same with $GITLAB_TOKEN).
 func (c *Config) Host(name string) (Host, error) {
 	if name == "" {
 		name = c.Default()
@@ -204,6 +255,7 @@ func (c *Config) Host(name string) (Host, error) {
 		for _, env := range []string{"GLCLI_TOKEN", "GITLAB_TOKEN"} {
 			if v := os.Getenv(env); v != "" {
 				h.Token, h.TokenSource = v, "$"+env
+				h.OAuth, h.Expiry = false, time.Time{}
 				break
 			}
 		}

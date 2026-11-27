@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"time"
+
 	"github.com/spf13/cobra"
 
 	"github.com/maelvls/glcli/internal/cli"
@@ -15,18 +17,29 @@ func newAuth(rt *cli.Runtime) *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "List the hosts of glab's config, without calling GitLab (tokens are not printed)",
-		Args:  cobra.NoArgs,
+		Long: `List the hosts of glab's config and where the token of each comes from,
+without calling GitLab. Tokens are never printed.
+
+A host glab logged in to with OAuth has "token_kind": "oauth", and
+"expires_at" when glab's config says when its token expires.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := rt.Config()
 			if err != nil {
 				return err
 			}
 			type host struct {
-				Name    string `json:"name"`
-				User    string `json:"user,omitempty"`
-				Token   string `json:"token"`
-				Default bool   `json:"default,omitempty"`
-				APIURL  string `json:"api_url"`
+				Name  string `json:"name"`
+				User  string `json:"user,omitempty"`
+				Token string `json:"token"`
+				// TokenKind is "oauth" for a host glab logged in to with
+				// OAuth, and absent for an access token.
+				TokenKind string `json:"token_kind,omitempty"`
+				// ExpiresAt is when glab's config says the OAuth token
+				// expires.
+				ExpiresAt string `json:"expires_at,omitempty"`
+				Default   bool   `json:"default,omitempty"`
+				APIURL    string `json:"api_url"`
 			}
 			var hosts []host
 			def := cfg.Default()
@@ -40,7 +53,14 @@ func newAuth(rt *cli.Runtime) *cobra.Command {
 				if err != nil {
 					status = "missing"
 				}
-				hosts = append(hosts, host{Name: n, User: h.User, Token: status, Default: n == def, APIURL: h.BaseURL() + "/api/v4"})
+				row := host{Name: n, User: h.User, Token: status, Default: n == def, APIURL: h.BaseURL() + "/api/v4"}
+				if h.OAuth {
+					row.TokenKind = "oauth"
+					if !h.Expiry.IsZero() {
+						row.ExpiresAt = h.Expiry.Format(time.RFC3339)
+					}
+				}
+				hosts = append(hosts, row)
 			}
 			return rt.Print(struct {
 				Config string `json:"config"`
