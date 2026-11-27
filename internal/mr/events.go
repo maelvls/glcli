@@ -105,12 +105,16 @@ var Triggers = []string{"push", "rebase", "comment", "thread", "approval", "stat
 var DefaultTriggers = []string{"push", "comment", "thread", "approval", "state"}
 
 // Differ computes the events between a cursor and a snapshot. It caches
-// the patch hash of each diff version, so polling is cheap.
+// what it asks the compare API (the hash of a diff, the commits of a
+// push), so polling is cheap: a wait meets the same pending push at
+// every poll. It is not safe for concurrent use.
 type Differ struct {
 	Client       *gitlab.Client
 	People       People
 	MaxBodyChars int
 	hashes       map[string]patchHash
+	// commits are the answers of newCommits, by "from..to".
+	commits map[string][]CommitView
 }
 
 type patchHash struct {
@@ -321,12 +325,20 @@ func position(p *gitlab.Position) (string, int) {
 	return file, 0
 }
 
+// newCommits lists the commits between from and the head, the last 20 at
+// most. The answer is kept: commits do not change. A failure is not, so
+// that the next poll asks again, except a 404: a commit is gone.
 func (d *Differ) newCommits(ctx context.Context, s *Snapshot, from string) ([]CommitView, error) {
+	key := from + ".." + s.MR.SHA
+	if out, ok := d.commits[key]; ok {
+		return out, nil
+	}
 	var cmp struct {
 		Commits []gitlab.Commit `json:"commits"`
 	}
 	q := url.Values{"from": {from}, "to": {s.MR.SHA}, "straight": {"false"}}
-	if err := d.Client.Get(ctx, "projects/"+strconv.Itoa(s.MR.ProjectID)+"/repository/compare", q, &cmp); err != nil {
+	err := d.Client.Get(ctx, "projects/"+strconv.Itoa(s.MR.ProjectID)+"/repository/compare", q, &cmp)
+	if err != nil && !gitlab.IsStatus(err, 404) {
 		return nil, err
 	}
 	var out []CommitView
@@ -336,6 +348,10 @@ func (d *Differ) newCommits(ctx context.Context, s *Snapshot, from string) ([]Co
 	if len(out) > 20 {
 		out = out[len(out)-20:]
 	}
+	if d.commits == nil {
+		d.commits = map[string][]CommitView{}
+	}
+	d.commits[key] = out
 	return out, nil
 }
 
@@ -387,14 +403,13 @@ func (d *Differ) hash(ctx context.Context, projectID int, base, head string) (pa
 		CompareTimeout bool                  `json:"compare_timeout"`
 	}
 	q := url.Values{"from": {base}, "to": {head}, "straight": {"true"}}
-	if err := d.Client.Get(ctx, "projects/"+strconv.Itoa(projectID)+"/repository/compare", q, &cmp); err != nil {
-		if gitlab.IsStatus(err, 404) {
-			return patchHash{}, nil // a commit is gone
-		}
+	err := d.Client.Get(ctx, "projects/"+strconv.Itoa(projectID)+"/repository/compare", q, &cmp)
+	gone := gitlab.IsStatus(err, 404) // a commit is gone, and stays so
+	if err != nil && !gone {
 		return patchHash{}, err
 	}
 	h := patchHash{}
-	if cmp.Diffs != nil && !cmp.CompareTimeout {
+	if !gone && cmp.Diffs != nil && !cmp.CompareTimeout {
 		h.sum, h.known = PatchID(*cmp.Diffs)
 	}
 	if d.hashes == nil {
