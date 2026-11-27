@@ -68,7 +68,7 @@ func run(rt *cli.Runtime, args []string) int {
 	}
 	fmt.Fprintf(rt.Stderr, "glcli: %v\n", err)
 	if gitlab.IsStatus(err, 401) {
-		fmt.Fprintln(rt.Stderr, "glcli: the token was rejected: run `glab auth login --hostname <host>` (glcli reads glab's config), or `glcli auth status`")
+		fmt.Fprintln(rt.Stderr, "glcli: "+rejectedTokenHint(err))
 	}
 	return 1
 }
@@ -91,6 +91,17 @@ func commandTimeout() time.Duration {
 		}
 	}
 	return defaultCommandTimeout
+}
+
+// rejectedTokenHint says what to do after an HTTP 401, naming the host
+// that answered it (as glab calls it) when the error tells.
+func rejectedTokenHint(err error) string {
+	host := "<host>"
+	var apiErr *gitlab.APIError
+	if errors.As(err, &apiErr) && apiErr.Host != "" {
+		host = apiErr.Host
+	}
+	return "the token was rejected: run `glab auth login --hostname " + host + "` (glcli reads glab's config), or `glcli auth status`"
 }
 
 type usageError struct{ error }

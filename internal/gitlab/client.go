@@ -48,6 +48,9 @@ func keepTokenOnHost(req *http.Request, via []*http.Request) error {
 
 // APIError is a non-2xx answer from GitLab.
 type APIError struct {
+	// Host is the name of the host as glab knows it (config.Host.Name),
+	// for hints that tell which host to log in to.
+	Host    string
 	Method  string
 	Path    string
 	Status  int
@@ -137,7 +140,7 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 	if resp.StatusCode/100 != 2 {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, &APIError{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
+		return nil, &APIError{Host: c.Host.Name, Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
 	}
 	return resp, nil
 }
