@@ -121,6 +121,11 @@ func rejectedTokenHint(err error) string {
 	if strings.HasPrefix(source, "$") {
 		return "the token from " + source + " was rejected by " + host + ": unset it (glcli then reads glab's config) or replace it; `glcli auth status` shows where each token comes from"
 	}
+	// glab's config has another token by now, but for another API address
+	// or another user than this command started with: it was not used.
+	if apiErr != nil && errors.Is(apiErr.Renewal, gitlab.ErrLoginChanged) {
+		return "the token was rejected, and " + apiErr.Renewal.Error() + ". Run the same glcli command again: it will use the new login from its start"
+	}
 	if apiErr != nil && apiErr.OAuth {
 		what := "the OAuth token of " + host + " was rejected (glab's config does not say when it expires)"
 		switch expiry := apiErr.TokenExpiry; {

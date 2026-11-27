@@ -20,6 +20,7 @@ type fakeRenewer struct {
 	calls []string // the token each call was made for
 	gens  []int
 	gen   int
+	why   error // what Renew says when it has no token left
 }
 
 func (f *fakeRenewer) Generation() int {
@@ -28,18 +29,18 @@ func (f *fakeRenewer) Generation() int {
 	return f.gen
 }
 
-func (f *fakeRenewer) Renew(rejected config.Host, generation int) (config.Host, bool) {
+func (f *fakeRenewer) Renew(rejected config.Host, generation int) (config.Host, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, rejected.Token)
 	f.gens = append(f.gens, generation)
 	f.gen++
 	if len(f.next) == 0 {
-		return rejected, false
+		return rejected, false, f.why
 	}
 	h := f.next[0]
 	f.next = f.next[1:]
-	return h, true
+	return h, true, nil
 }
 
 // acceptOnly is a fake GitLab that takes one token, in one header.
@@ -185,5 +186,25 @@ func TestClientAsksTheRenewerOnlyAboutItsToken(t *testing.T) {
 	}
 	if len(renewer.calls) != 0 {
 		t.Errorf("the renewer was asked %d times, want 0", len(renewer.calls))
+	}
+}
+
+// What the Renewer says of a token it did not give is kept in the error,
+// for the hint; the error itself reads as before.
+func TestClientKeepsWhyNoTokenWasTried(t *testing.T) {
+	accept := "nothing"
+	gl, seen := acceptOnly(t, &accept)
+	why := fmt.Errorf("%w: something else", ErrLoginChanged)
+	c := New(config.Host{Name: "test", Token: "old", TokenSource: "config.yml"})
+	c.BaseURL = gl.URL
+	c.Renewer = &fakeRenewer{why: why}
+	var out map[string]any
+	err := c.Get(context.Background(), "user", nil, &out)
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.Status != 401 || apiErr.Renewal != why || apiErr.Error() != "GitLab GET user: HTTP 401: 401 Unauthorized" {
+		t.Errorf("got %#v", err)
+	}
+	if len(*seen) != 1 {
+		t.Errorf("requests: %q, want one", *seen)
 	}
 }

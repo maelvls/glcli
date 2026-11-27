@@ -34,14 +34,15 @@ type Runtime struct {
 	// NewClient can be replaced in tests.
 	NewClient func(h config.Host) *gitlab.Client
 
-	mu       sync.Mutex
-	cfg      *config.Config
-	reread   *config.Config // the config as last read again after a rejected token
-	reloads  int            // how many times it was read again
-	clients  map[string]*gitlab.Client
-	me       map[string]string
-	warnings []string
-	hints    []string
+	mu        sync.Mutex
+	cfg       *config.Config
+	reread    *config.Config // the config as last read again after a rejected token
+	rereadErr error          // why it could not be read again, the last time
+	reloads   int            // how many times it was read again
+	clients   map[string]*gitlab.Client
+	me        map[string]string
+	warnings  []string
+	hints     []string
 
 	// reloadMu makes the goroutines whose token was rejected read glab's
 	// config again one at a time. It is taken before mu, never after.
@@ -158,29 +159,34 @@ func (n renewer) Generation() int {
 // read after their request left, and so do not read it again. A request
 // that leaves after that and is rejected too makes the config be read
 // again: a command that waits looks again at each poll.
-func (n renewer) Renew(rejected config.Host, generation int) (config.Host, bool) {
+func (n renewer) Renew(rejected config.Host, generation int) (config.Host, bool, error) {
 	r := n.r
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
 	r.mu.Lock()
-	reread, reloads := r.reread, r.reloads
+	reread, failed, reloads := r.reread, r.rereadErr, r.reloads
 	r.mu.Unlock()
-	if h, ok := otherToken(reread, rejected); ok {
-		return h, true
+	if h, ok, _ := otherToken(reread, rejected); ok {
+		return h, true, nil
 	}
 	if reloads != generation {
-		return rejected, false
+		// The answer of the goroutine that read the config for this burst.
+		if failed != nil {
+			return rejected, false, failed
+		}
+		return otherToken(reread, rejected)
 	}
 	fresh, err := r.LoadConfig()
 	r.mu.Lock()
 	r.reloads++
+	r.rereadErr = err
 	if err == nil {
 		r.reread = fresh
 	}
 	r.mu.Unlock()
 	if err != nil {
 		r.Tracef("%s: the token was rejected, and glab's config cannot be read again: %v", rejected.Name, err)
-		return rejected, false
+		return rejected, false, err
 	}
 	r.Tracef("%s: the token was rejected: glab's config was read again", rejected.Name)
 	return otherToken(fresh, rejected)
@@ -190,15 +196,30 @@ func (n renewer) Renew(rejected config.Host, generation int) (config.Host, bool)
 // has another token for it than the rejected one. The tokens of the
 // environment are not looked at: cfg may name another default host than
 // the config the command started with, and they are for the default host.
-func otherToken(cfg *config.Config, rejected config.Host) (config.Host, bool) {
+//
+// A token is only taken for what the rejected one was for. The command
+// goes on with the API address it started with: a token that the file now
+// gives for another API address would be sent to a host it was not written
+// for. And it goes on with the username it started with (see Me): a token
+// of another user would have "inbox wait" look for the merge requests of
+// the first user in the name of the second. In both cases the error has
+// gitlab.ErrLoginChanged, and the command ends with its 401: run again, it
+// reads the new login as a whole.
+func otherToken(cfg *config.Config, rejected config.Host) (config.Host, bool, error) {
 	if cfg == nil {
-		return rejected, false
+		return rejected, false, nil
 	}
 	h, ok := cfg.Hosts[rejected.Name]
 	if !ok || h.Token == "" || h.Token == rejected.Token {
-		return rejected, false
+		return rejected, false, nil
 	}
-	return h, true
+	if h.BaseURL() != rejected.BaseURL() {
+		return rejected, false, fmt.Errorf("%w: the API of %s is now at %s there", gitlab.ErrLoginChanged, rejected.Name, h.BaseURL())
+	}
+	if h.User != "" && rejected.User != "" && h.User != rejected.User {
+		return rejected, false, fmt.Errorf("%w: %s is now logged in as %s there", gitlab.ErrLoginChanged, rejected.Name, h.User)
+	}
+	return h, true, nil
 }
 
 // Me returns the username of the token's owner on c's host: the one glab

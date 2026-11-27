@@ -51,10 +51,19 @@ type Renewer interface {
 	Generation() int
 	// Renew is called after GitLab answered 401 to a request made with
 	// the token of rejected. It returns the host with the token to use
-	// instead and true, or false when there is no other token. It can be
-	// called by several goroutines at once.
-	Renew(rejected config.Host, generation int) (config.Host, bool)
+	// instead and true, or false when there is no other token. With
+	// false, it returns an error when it could not look for one, or when
+	// it found one that it must not hand out (ErrLoginChanged): the error
+	// goes to APIError.Renewal. It can be called by several goroutines at
+	// once.
+	Renew(rejected config.Host, generation int) (config.Host, bool, error)
 }
+
+// ErrLoginChanged is in the error of a Renewer that found another token
+// for the host, written for another API address or another user than the
+// rejected one: with it, the client would send a token where it was not
+// meant to go, or go on in the name of someone else.
+var ErrLoginChanged = errors.New("glab's config changed since this command started")
 
 // New returns a client for h.
 func New(h config.Host) *Client {
@@ -109,6 +118,11 @@ type APIError struct {
 	// config says it expires (config.Host.Expiry; zero when it does not).
 	OAuth       bool
 	TokenExpiry time.Time
+	// Renewal is why no other token was tried after a 401, when one was
+	// looked for and the answer was not simply "there is none": the place
+	// tokens come from could not be read again, or (ErrLoginChanged) holds
+	// a token that is not for the same instance and user.
+	Renewal error
 }
 
 func (e *APIError) Error() string {
@@ -193,8 +207,9 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*http.Respo
 	if c.Renewer == nil || !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnauthorized || apiErr.RedirectedTo != "" {
 		return resp, err
 	}
-	other, ok := c.Renewer.Renew(h, generation)
+	other, ok, why := c.Renewer.Renew(h, generation)
 	if !ok || other.Token == h.Token {
+		apiErr.Renewal = why
 		return nil, err
 	}
 	// The same host, with the other token and what goes with it.
