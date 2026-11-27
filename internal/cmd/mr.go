@@ -139,13 +139,23 @@ Events are computed against --cursor (from an earlier mr get or mr wait),
 so nothing that happened in between is missed; without it, against the
 state when the command starts. Kinds of events, selected with --on:
 
-  push      new commits whose changes differ ("rebase_only": false)
-  rebase    a push that keeps the same changes (rebase, reword)
+  push      new commits whose changes differ ("rebase_only": false), or
+            that could not be compared ("rebase_only" absent)
+  rebase    a push that keeps the same changes (rebase, reword:
+            "rebase_only": true)
   comment   a new comment by someone else (bots left out)
   thread    a thread resolved or reopened
   approval  an approval given or withdrawn
   state     merged, closed or reopened
   pipeline  the head pipeline reaching a final status
+
+A push is a rebase when GitLab's patch ID of the merge request (git
+patch-id of its changes) is the same before and after. This needs
+GitLab 18.2 or newer, whose patch IDs see whitespace, and a cursor that
+carries one. Without it (older GitLab, a cursor printed by an older
+glcli) glcli compares the two diffs itself, and they must be identical:
+a rebase onto a target branch that moved or changed the lines around a
+change then counts as a push.
 
 --on defaults to push,comment,thread,approval,state. What I did myself
 (my push, my approval, my resolve, my merge, my close) does not end the
