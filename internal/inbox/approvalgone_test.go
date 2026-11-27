@@ -139,6 +139,53 @@ func TestApprovalGone(t *testing.T) {
 			notes:    []gitlab.Note{approval, note(2, "bob", 5, retargetNote, true), note(3, "me", 6, "fine", false)},
 			want:     []string{"new_commits"}, at: 10,
 		},
+
+		// A push of mine is not that change, nor is its rebase by someone
+		// else: I know the patch I pushed.
+		{
+			name:     "a change removed my approval, I commented, it was rebased, I pushed a commit, then it was rebased: I know",
+			versions: []gitlab.Version{version(12, "C"), version(10, "C"), version(8, "B"), version(5, "B"), opened},
+			notes: []gitlab.Note{
+				approval, pushBy(2, "bob", 5), note(3, "me", 6, "fine", false), pushBy(4, "bob", 8), pushBy(5, "me", 10), pushBy(6, "bob", 12),
+			},
+		},
+		{
+			name:     "a change removed my approval, I commented, I pushed a commit, then it changed",
+			versions: []gitlab.Version{version(12, "D"), version(10, "C"), version(5, "B"), opened},
+			notes:    []gitlab.Note{approval, pushBy(2, "bob", 5), note(3, "me", 6, "fine", false), pushBy(4, "me", 10), pushBy(5, "bob", 12)},
+			want:     []string{"new_commits"}, at: 12,
+		},
+		{
+			name:     "a change removed my approval, I commented, I pushed a commit, it changed, then back to what I pushed: still waits on me",
+			versions: []gitlab.Version{version(14, "C"), version(12, "D"), version(10, "C"), version(5, "B"), opened},
+			notes: []gitlab.Note{
+				approval, pushBy(2, "bob", 5), note(3, "me", 6, "fine", false), pushBy(4, "me", 10), pushBy(5, "bob", 12), pushBy(6, "bob", 14),
+			},
+			want: []string{"new_commits"}, at: 14,
+		},
+
+		// A retarget of mine is nothing I have to see.
+		{
+			name:     "never approved, I retargeted it myself, then it was rebased",
+			versions: []gitlab.Version{version(8, "A"), opened},
+			notes:    []gitlab.Note{note(1, "me", 3, "nit", false), note(2, "me", 6, retargetNote, true)},
+		},
+		{
+			name:     "never approved, I retargeted it myself, which made a new version of the diff",
+			versions: []gitlab.Version{version(6, "A"), opened},
+			notes:    []gitlab.Note{note(1, "me", 3, "nit", false), note(2, "me", 6, retargetNote, true)},
+		},
+		{
+			name:     "I retargeted it myself, I commented, then it was rebased: I know",
+			versions: []gitlab.Version{version(8, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "me", 5, retargetNote, true), note(3, "me", 6, "fine", false)},
+		},
+		{
+			name:     "I retargeted it myself, then a rebase: my approval is gone, as after any rebase",
+			versions: []gitlab.Version{version(8, "A"), opened},
+			notes:    []gitlab.Note{approval, note(2, "me", 5, retargetNote, true)},
+			want:     []string{"new_commits"}, at: 8,
+		},
 		{
 			name:     "someone only talks about a target branch before my comment, then a rebase removed my approval",
 			versions: []gitlab.Version{version(8, "A"), opened},
