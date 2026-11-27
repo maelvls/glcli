@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strconv"
@@ -144,20 +145,34 @@ func TestFromMR(t *testing.T) {
 	fork := Summary{ID: 95, Project: "contributor/project", Status: "running", URL: "https://gitlab.com/contributor/project/-/pipelines/95"}
 	denied := &gitlab.APIError{Method: "GET", Path: "projects/contributor%2Fproject/pipelines/95", Status: 404, Message: "404 Project Not Found"}
 	r := FromMR(fork, denied)
-	if r.Pipeline != fork || !r.Running || len(r.FailedJobs) != 0 || len(r.Downstream) != 0 {
-		t.Errorf("want the pipeline as the merge request reports it, running: %+v", r)
+	// The same pipeline, marked as one that could not be read.
+	want := fork
+	want.Unreadable = true
+	if r.Pipeline != want || !r.Running || !r.Partial() || len(r.FailedJobs) != 0 || len(r.Downstream) != 0 {
+		t.Errorf("want the pipeline as the merge request reports it, unreadable and running: %+v", r)
 	}
 	if len(r.Warnings) != 1 {
 		t.Fatalf("want one warning, got %q", r.Warnings)
 	}
-	for _, want := range []string{"pipeline 95", "contributor/project", "the fork", "cannot read", "HTTP 404", "(running)", "failed jobs", "downstream pipelines"} {
+	// Its downstream pipelines are not only missing: nothing waited for
+	// them, and they may not have finished.
+	for _, want := range []string{"pipeline 95", "contributor/project", "the fork", "cannot read", "HTTP 404", "(running)", "its failed jobs",
+		`its own downstream pipelines, which "pipeline wait" does not wait for (they may still be running, or have failed)`} {
 		if !strings.Contains(r.Warnings[0], want) {
 			t.Errorf("the warning lacks %q: %s", want, r.Warnings[0])
 		}
 	}
+	if strings.Contains(r.Warnings[0], "It failed") {
+		t.Errorf("the pipeline has not failed: %s", r.Warnings[0])
+	}
 	fork.Status = "failed"
-	if r := FromMR(fork, denied); r.Running || !strings.Contains(r.Warnings[0], "(failed)") {
-		t.Errorf("want a finished pipeline, failed: %+v", r)
+	r = FromMR(fork, denied)
+	if r.Running || !strings.Contains(r.Warnings[0], "(failed)") ||
+		!strings.HasSuffix(r.Warnings[0], `It failed, and "failed_jobs" does not say why: see https://gitlab.com/contributor/project/-/pipelines/95`) {
+		t.Errorf("want a finished pipeline, failed, and a warning that says so: %+v", r)
+	}
+	if b, err := json.Marshal(r.Pipeline); err != nil || !strings.Contains(string(b), `"unreadable":true`) {
+		t.Errorf("want \"unreadable\": true in the JSON of the pipeline, got %s, %v", b, err)
 	}
 }
 

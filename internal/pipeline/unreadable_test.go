@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"slices"
 	"strings"
@@ -60,6 +61,67 @@ func has(t *testing.T, r *Report, want []string, not ...string) {
 	}
 }
 
+// marked lists the pipelines of r that are marked as unreadable; 0 is
+// the pipeline the report is about.
+func marked(r *Report) []int {
+	var ids []int
+	if r.Pipeline.Unreadable {
+		ids = append(ids, 0)
+	}
+	for _, s := range r.Downstream {
+		if s.Unreadable {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids
+}
+
+// An agent is not to depend on the prose of a warning: the pipeline that
+// could not be read is marked in the JSON, and only that one.
+func TestCollectMarksThePipelinesItCouldNotRead(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		fake func() *fake
+		want []int
+	}{
+		{"all readable", func() *fake { return tree("failed") }, nil},
+		{"trigger jobs refused", func() *fake { f := tree("failed"); f.routes[e2eBridges] = answer(403); return f }, []int{200}},
+		{"jobs refused", func() *fake { f := tree("failed"); f.routes[e2eJobs] = answer(403); return f }, []int{200}},
+		{"second level", func() *fake { return deeper("failed", "failed") }, []int{400}},
+	} {
+		r, err := Collect(context.Background(), tt.fake().client(t), "group/project", 100, whole)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if got := marked(r); !slices.Equal(got, tt.want) || r.Partial() != (len(tt.want) > 0) {
+			t.Errorf("%s: unreadable pipelines %v (partial: %v), want %v", tt.name, got, r.Partial(), tt.want)
+		}
+		b, err := json.Marshal(r)
+		if n := strings.Count(string(b), `"unreadable":true`); err != nil || n != len(tt.want) {
+			t.Errorf("%s: \"unreadable\": true %d times in the JSON, want %d: %s, %v", tt.name, n, len(tt.want), b, err)
+		}
+		if len(tt.want) == 0 && strings.Contains(string(b), "unreadable") {
+			t.Errorf("%s: no \"unreadable\" key is wanted for a pipeline that was read: %s", tt.name, b)
+		}
+	}
+}
+
+// The trigger job gives no web_url for the pipeline: the warning still
+// says that it failed and that failed_jobs does not have the reason.
+func TestCollectUnreadableFailedDownstreamWithoutURL(t *testing.T) {
+	f := tree("failed")
+	f.routes["projects/group/project/pipelines/100/bridges"] = ok(`[{"id":10,"name":"e2e","status":"failed","downstream_pipeline":{"id":200,"project_id":6,"status":"failed"}}]`)
+	f.routes[e2eJobs] = answer(403)
+	r, err := Collect(context.Background(), f.client(t), "group/project", 100, whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	has(t, r, []string{"the downstream pipeline 200 (in 6,", "its failed jobs"}, "see ")
+	if !strings.HasSuffix(r.Warnings[0], `Missing from this result: its failed jobs. It failed, and "failed_jobs" does not say why.`) {
+		t.Errorf("the warning must end on the failure: %s", r.Warnings[0])
+	}
+}
+
 // who is how the warnings name pipeline 200.
 const who = `the downstream pipeline 200 (in group/e2e, started by the trigger job "e2e" of pipeline 100)`
 
@@ -81,7 +143,8 @@ func TestCollectDownstreamTriggerJobsRefused(t *testing.T) {
 	if r.Running {
 		t.Error("every pipeline has finished: want running false")
 	}
-	has(t, r, []string{who, "HTTP 403", "Its status (failed) is the one its trigger job reports", "its own downstream pipelines"}, "its failed jobs", "It failed")
+	has(t, r, []string{who, "HTTP 403", "Its status (failed) is the one its trigger job reports",
+		`its own downstream pipelines, which "pipeline wait" does not wait for (they may still be running, or have failed)`}, "its failed jobs", "It failed")
 	// The pipeline after the unreadable one is still followed.
 	if len(f.asked("projects/5/pipelines/300/bridges")) != 1 {
 		t.Error("the trigger jobs of pipeline 300 were not read")

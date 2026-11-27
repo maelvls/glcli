@@ -56,10 +56,11 @@ func refuse(status int, paths ...string) map[string]func() (string, int) {
 // downstreamResult is what the tests read of a result.
 type downstreamResult struct {
 	Downstream []struct {
-		ID     int    `json:"id"`
-		Status string `json:"status"`
-		Bridge string `json:"bridge"`
-		Parent int    `json:"parent"`
+		ID         int    `json:"id"`
+		Status     string `json:"status"`
+		Bridge     string `json:"bridge"`
+		Parent     int    `json:"parent"`
+		Unreadable bool   `json:"unreadable"`
 	} `json:"downstream"`
 	FailedJobs []struct {
 		Name string `json:"name"`
@@ -88,17 +89,18 @@ func TestPipelineWithADownstreamPipelineTheTokenCannotRead(t *testing.T) {
 		name       string
 		refused    map[string]func() (string, int)
 		downstream []int
+		unreadable int
 		jobs       []string
 		warning    []string
 		not        []string
 	}{
-		{"its trigger jobs are refused", refuse(403, e2ePipeline+"/bridges"), []int{20}, []string{"e2e-1"},
+		{"its trigger jobs are refused", refuse(403, e2ePipeline+"/bridges"), []int{20}, 20, []string{"e2e-1"},
 			[]string{pipeline20, "HTTP 403", "Its status (failed)", "its own downstream pipelines"}, []string{"its failed jobs", "It failed"}},
-		{"its jobs are refused", refuse(403, e2ePipeline+"/jobs"), []int{20, 30}, nil,
+		{"its jobs are refused", refuse(403, e2ePipeline+"/jobs"), []int{20, 30}, 20, nil,
 			[]string{pipeline20, "HTTP 403", "Its status (failed)", "its failed jobs", "It failed", "https://gitlab.com/group/e2e/-/pipelines/20"}, []string{"its own downstream pipelines"}},
-		{"its project is not visible", refuse(404, e2ePipeline+"/jobs", e2ePipeline+"/bridges"), []int{20}, nil,
+		{"its project is not visible", refuse(404, e2ePipeline+"/jobs", e2ePipeline+"/bridges"), []int{20}, 20, nil,
 			[]string{pipeline20, "HTTP 404", "Its status (failed)", "its failed jobs; its own downstream pipelines", "It failed"}, nil},
-		{"second level", refuse(404, secretPipeline+"/jobs", secretPipeline+"/bridges"), []int{20, 30}, []string{"e2e-1"},
+		{"second level", refuse(404, secretPipeline+"/jobs", secretPipeline+"/bridges"), []int{20, 30}, 30, []string{"e2e-1"},
 			[]string{`the downstream pipeline 30 (in group/secret, started by the trigger job "publish" of pipeline 20)`, "HTTP 404", "Its status (success)", "its failed jobs; its own downstream pipelines"}, []string{"It failed"}},
 	} {
 		for _, args := range [][]string{
@@ -116,6 +118,12 @@ func TestPipelineWithADownstreamPipelineTheTokenCannotRead(t *testing.T) {
 				var ids []int
 				for _, d := range res.Downstream {
 					ids = append(ids, d.ID)
+					if d.Unreadable != (d.ID == tt.unreadable) {
+						t.Errorf("pipeline %d: unreadable %v; want it true for %d only, got %s", d.ID, d.Unreadable, tt.unreadable, line)
+					}
+				}
+				if strings.Count(line, `"unreadable":true`) != 1 {
+					t.Errorf("want \"unreadable\": true once, got %s", line)
 				}
 				if !slices.Equal(ids, tt.downstream) || res.Downstream[0].Status != "failed" || res.Downstream[0].Bridge != "e2e" || res.Downstream[0].Parent != 7 {
 					t.Errorf("want the downstream pipelines %v, the first failed, got %s", tt.downstream, line)

@@ -31,6 +31,11 @@ type Summary struct {
 	// Parent is the ID of the pipeline that triggered this one.
 	Parent int `json:"parent,omitempty"`
 	Depth  int `json:"depth,omitempty"`
+	// Unreadable is true when GitLab refused to show the pipeline, or
+	// part of it, to this token: its failed jobs, its downstream
+	// pipelines or both are missing from the report, and a warning says
+	// which. Its status is still known.
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 // FailedJob is a job that failed, in any pipeline of the tree.
@@ -68,6 +73,11 @@ type Report struct {
 	Warnings []string `json:"-"`
 }
 
+// Partial reports whether a pipeline of the report is Unreadable.
+func (r *Report) Partial() bool {
+	return r.Pipeline.Unreadable || slices.ContainsFunc(r.Downstream, func(s Summary) bool { return s.Unreadable })
+}
+
 // Options tune the report.
 type Options struct {
 	LogLines       int
@@ -87,7 +97,7 @@ func Collect(ctx context.Context, c *gitlab.Client, project string, id int, o Op
 		return nil, err
 	}
 	r := &Report{Pipeline: summary(p.PipelineRef, project)}
-	root := node{Summary: r.Pipeline, api: project, shown: project}
+	root := node{Summary: r.Pipeline, at: -1, api: project, shown: project}
 	if _, err := strconv.Atoi(project); err == nil {
 		// Named by its ID, as the fork of a merge request is: the failed
 		// jobs name it as the pipeline does, by its path.
@@ -125,6 +135,9 @@ func projectFromURL(u string) string {
 // node is a pipeline of the tree a report is about.
 type node struct {
 	Summary
+	// at is its place in Report.Downstream, -1 for the pipeline the
+	// report is about.
+	at int
 	// api names its project in API requests. For a downstream pipeline,
 	// and for a pipeline in the fork of a merge request, that is the
 	// numeric ID GitLab gives (project_id), not the path found in web_url,
@@ -143,9 +156,10 @@ type node struct {
 // then refuses its jobs and its trigger jobs (Denied). That does not fail
 // the report: the pipeline is listed with the status the trigger job that
 // started it gives, which is read again at each call, with the trigger
-// jobs of its parent; it is not followed further, and a warning says what
-// is missing. The same refusal for the pipeline the report is about
-// (depth 0) is an error, as is any other error for any pipeline.
+// jobs of its parent; it is not followed further, it is marked Unreadable
+// and a warning says what is missing. The same refusal for the pipeline
+// the report is about (depth 0) is an error, as is any other error for
+// any pipeline.
 func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) error {
 	id, depth := n.ID, n.Depth
 	base := gitlab.Project(n.api) + "/pipelines/" + strconv.Itoa(id)
@@ -182,6 +196,7 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) e
 		r.Truncated = r.Truncated || truncated
 	}
 	if denied != nil {
+		r.Downstream[n.at].Unreadable = true
 		r.Warnings = append(r.Warnings, unreadable(n.Summary, missing, denied))
 	}
 	for _, b := range bridges {
@@ -199,7 +214,7 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) e
 		if !mr.Finished(dp.Status) {
 			r.Running = true
 		}
-		down := node{Summary: s, api: s.Project, shown: s.Project}
+		down := node{Summary: s, at: len(r.Downstream) - 1, api: s.Project, shown: s.Project}
 		if dp.ProjectID != 0 {
 			down.api = strconv.Itoa(dp.ProjectID)
 		}
@@ -210,21 +225,31 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) e
 	return nil
 }
 
-// What a downstream pipeline that cannot be read lacks in the report.
+// What a pipeline that cannot be read lacks in the report.
 const (
 	missingJobs       = "its failed jobs"
-	missingDownstream = `its own downstream pipelines, which "pipeline wait" does not wait for`
+	missingDownstream = `its own downstream pipelines, which "pipeline wait" does not wait for (they may still be running, or have failed)`
 )
+
+// lacking is the end of the warning for the pipeline p, of which GitLab
+// refused to show what missing lists.
+func lacking(p Summary, missing []string) string {
+	w := "Missing from this result: " + strings.Join(missing, "; ") + "."
+	if p.Status == "failed" && slices.Contains(missing, missingJobs) {
+		w += ` It failed, and "failed_jobs" does not say why`
+		if p.URL != "" {
+			return w + ": see " + p.URL
+		}
+		w += "."
+	}
+	return w
+}
 
 // unreadable is the warning for the downstream pipeline p, of which
 // GitLab refused (err) to show what missing lists.
 func unreadable(p Summary, missing []string, err error) string {
-	w := fmt.Sprintf("the downstream pipeline %d (in %s, started by the trigger job %q of pipeline %d) could not be read: %v. Its status (%s) is the one its trigger job reports. Missing from this result: %s.",
-		p.ID, p.Project, p.Bridge, p.Parent, err, p.Status, strings.Join(missing, "; "))
-	if p.Status == "failed" && p.URL != "" && slices.Contains(missing, missingJobs) {
-		w += fmt.Sprintf(` It failed, and "failed_jobs" does not say why: see %s`, p.URL)
-	}
-	return w
+	return fmt.Sprintf("the downstream pipeline %d (in %s, started by the trigger job %q of pipeline %d) could not be read: %v. Its status (%s) is the one its trigger job reports. %s",
+		p.ID, p.Project, p.Bridge, p.Parent, err, p.Status, lacking(p, missing))
 }
 
 // failedJobs adds the failed jobs of one pipeline to r. GitLab is asked
@@ -355,12 +380,16 @@ func Denied(err error) bool {
 // read (err) because it runs in a fork the token cannot read: what the
 // merge request says of it (fork, see Found.Fork), and a warning for what
 // is missing. The merge request is read again at each poll of "pipeline
-// wait", so this status is as fresh as one read from the pipeline.
+// wait", so this status is as fresh as one read from the pipeline. It is
+// all that such a wait goes by: the pipelines downstream of this one
+// cannot be seen, and are not waited for.
 func FromMR(fork Summary, err error) *Report {
+	fork.Unreadable = true
 	return &Report{
 		Pipeline: fork,
 		Running:  !mr.Finished(fork.Status),
-		Warnings: []string{fmt.Sprintf("pipeline %d of this merge request runs in another project, %s (the fork the merge request comes from), which this token cannot read: %v. Its status (%s) is the one the merge request reports; its failed jobs and its downstream pipelines are not in this result.", fork.ID, fork.Project, err, fork.Status)},
+		Warnings: []string{fmt.Sprintf("pipeline %d of this merge request runs in another project, %s (the fork the merge request comes from), which this token cannot read: %v. Its status (%s) is the one the merge request reports. %s",
+			fork.ID, fork.Project, err, fork.Status, lacking(fork, []string{missingJobs, missingDownstream}))},
 	}
 }
 

@@ -120,8 +120,8 @@ func TestPipelineOfAMergeRequestFromAFork(t *testing.T) {
 				}
 				line := e.stdout.String()
 				id, st, warnings, _ := printed(t, e, out)
-				if id != 7 || st != "failed" || string(out["running"]) != "false" || len(warnings) != 0 {
-					t.Errorf("want the pipeline 7, failed, without a warning, got %s", line)
+				if id != 7 || st != "failed" || string(out["running"]) != "false" || len(warnings) != 0 || strings.Contains(line, "unreadable") {
+					t.Errorf("want the pipeline 7, failed, without a warning nor \"unreadable\", got %s", line)
 				}
 				var p struct {
 					Project string `json:"project"`
@@ -221,7 +221,8 @@ func forkWarning(t *testing.T, e *waitEnv, warnings []string, status string) {
 	if len(warnings) != 1 {
 		t.Fatalf("want one warning, got %s", e.stdout.String())
 	}
-	for _, want := range []string{"pipeline 7", "contributor/project", "the fork", "cannot read", "HTTP 404", "(" + status + ")", "failed jobs", "downstream pipelines"} {
+	for _, want := range []string{"pipeline 7", "contributor/project", "the fork", "cannot read", "HTTP 404", "(" + status + ")", "its failed jobs",
+		`its own downstream pipelines, which "pipeline wait" does not wait for (they may still be running, or have failed)`} {
 		if !strings.Contains(warnings[0], want) {
 			t.Errorf("the warning lacks %q: %s", want, warnings[0])
 		}
@@ -243,10 +244,17 @@ func TestPipelineInAForkTheTokenCannotRead(t *testing.T) {
 			id, status, warnings, _ := printed(t, e, out)
 			var p struct {
 				Project, URL, SHA string
+				Unreadable        bool
 			}
 			if err := json.Unmarshal(out["pipeline"], &p); err != nil || id != 7 || status != "failed" ||
 				p.Project != "contributor/project" || p.URL != "https://gitlab.com/contributor/project/-/pipelines/7" || p.SHA != forkHeadSHA {
 				t.Errorf("want the pipeline 7 as the merge request reports it, got %s", line)
+			}
+			if !p.Unreadable || strings.Count(line, `"unreadable":true`) != 1 {
+				t.Errorf("want \"unreadable\": true on the pipeline, got %s", line)
+			}
+			if !strings.Contains(warnings[0], `It failed, and "failed_jobs" does not say why: see https://gitlab.com/contributor/project/-/pipelines/7`) {
+				t.Errorf("the warning must say that the pipeline failed: %s", warnings[0])
 			}
 			if string(out["running"]) != "false" || string(out["failed_jobs"]) != "[]" || out["timed_out"] != nil {
 				t.Errorf("want a finished pipeline without jobs, got %s", line)
