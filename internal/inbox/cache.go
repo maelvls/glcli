@@ -38,9 +38,11 @@ import (
 //     the previous one, what is printed must come from a Collect that
 //     kept nothing: see Kept and Expire.
 //
-// What is kept for merge requests I review can thus show, for up to
-// maxAge, an older pipeline status, merge status or count of unresolved
-// threads: none of them is a reason.
+// What is kept can thus show, for up to maxAge, an older pipeline status,
+// merge status or count of unresolved threads for the merge requests I
+// review, and an older count of unresolved threads for my own: none of
+// them is a reason, and inbox wait never prints them from what is kept
+// (it reads everything before it prints).
 //
 // A Cache is safe for concurrent use. Errors are not kept: a merge
 // request that could not be read is read again in full the next time.

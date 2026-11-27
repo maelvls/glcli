@@ -185,11 +185,17 @@ that nothing is missed between two commands.
 It polls every --interval (2m), keeps trying while GitLab cannot be
 reached, and has no time limit unless --timeout. Between two polls, a
 merge request whose updated_at did not change is not read again (my own
-ones: only their pipeline and merge status), except once every 20
-minutes, and right after a change. Prints what "inbox"
-prints; on timeout, items is [], timed_out is true, and checked_at is the
---since to wait again with. Exit codes: 0 (also on timeout), 1 on error,
-130 when interrupted.`,
+ones: only their pipeline and merge status; those I approved: only their
+approvals), except once every 20 minutes, and right after a change. So
+what GitLab does without changing updated_at, such as a push that leaves
+no "added N commits" note, can be reported late: up to 20 minutes after
+that merge request was last read in full, rounded up to a poll (longer
+if --interval is longer). When something is new, everything is read
+again before it is printed.
+
+Prints what "inbox" prints; on timeout, items is [], timed_out is true,
+and checked_at is the --since to wait again with. Exit codes: 0 (also on
+timeout), 1 on error, 130 when interrupted.`,
 		Example: `  glcli inbox wait
   glcli inbox wait --since 2026-11-26T14:30:00+01:00 --timeout 4h
   glcli inbox wait --role review,todo --interval 5m`,
