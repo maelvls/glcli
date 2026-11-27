@@ -335,10 +335,9 @@ func (it *Item) add(reason string, at time.Time) {
 // "@user." at the end of a sentence counts. Case is ignored, as GitLab
 // does for usernames: "@Mael.Valais" mentions mael.valais.
 func mentions(body, user string) bool {
-	body = strings.ToLower(body)
-	tag := "@" + strings.ToLower(user)
+	tag := "@" + user
 	for from := 0; ; {
-		i := strings.Index(body[from:], tag)
+		i := indexFoldASCII(body[from:], tag)
 		if i < 0 {
 			return false
 		}
@@ -349,6 +348,29 @@ func mentions(body, user string) bool {
 		}
 		from = end
 	}
+}
+
+// indexFoldASCII is strings.Index ignoring the case of ASCII letters
+// only: GitLab usernames are ASCII, and Unicode case folding would also
+// read the Kelvin sign as "k" and "İ" as "i".
+func indexFoldASCII(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		j := 0
+		for j < len(sub) && lowerASCII(s[i+j]) == lowerASCII(sub[j]) {
+			j++
+		}
+		if j == len(sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+func lowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + 'a' - 'A'
+	}
+	return b
 }
 
 func isUsernameChar(b byte) bool {
