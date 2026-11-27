@@ -13,7 +13,9 @@ func id(t *testing.T, diffs ...gitlab.VersionDiff) (string, bool) {
 }
 
 func TestPatchIDSeesRealChanges(t *testing.T) {
-	f := func(diff string) gitlab.VersionDiff { return gitlab.VersionDiff{OldPath: "x", NewPath: "x", Diff: diff} }
+	f := func(diff string) gitlab.VersionDiff {
+		return gitlab.VersionDiff{OldPath: "x", NewPath: "x", Diff: diff}
+	}
 	// An indentation fix is a change (YAML, Python).
 	a, _ := id(t, f("@@ -1 +1 @@\n-a:\n+  b: 1\n"))
 	b, _ := id(t, f("@@ -1 +1 @@\n-a:\n+    b: 1\n"))

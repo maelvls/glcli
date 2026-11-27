@@ -130,7 +130,7 @@ GLCLI_COMMAND_TIMEOUT_MS (30000; the wait commands have no timeout).`,
 	root.PersistentFlags().StringVar(&rt.HostFlag, "host", "", "GitLab host, such as gitlab.com or code.pan.run (default: the URL's, the git remote's, or glab's default host)")
 	root.PersistentFlags().StringVarP(&rt.RepoFlag, "repo", "R", "", "Project for short references such as !123: group/project or its URL")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
-	root.AddCommand(newMR(rt), newPipeline(rt), newInbox(rt), newAuth(rt))
+	root.AddCommand(newMR(rt), newPipeline(rt), newInbox(rt), newAuth(rt), newSkills(rt))
 	return root
 }
 

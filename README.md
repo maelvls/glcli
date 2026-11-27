@@ -38,10 +38,16 @@ glcli does those once:
 ## Install
 
 ```sh
-make install   # go install ./cmd/glcli, and the agent skill into ~/.claude/skills/glcli
+go install github.com/maelvls/glcli/cmd/glcli@latest
+glcli skills install    # the agent skill, embedded in the binary, into ~/.claude/skills/glcli
 ```
 
-To have the skill follow this checkout instead of a copy:
+After upgrading, `glcli skills install --overwrite` updates the skill.
+`--dir` installs it elsewhere (a project's `.claude/skills`, another
+agent's skills directory). From a checkout, `make install` does both steps.
+
+To have the skill follow a checkout instead of a copy (`skills install`
+then leaves the symlink alone):
 
 ```sh
 ln -s "$PWD/skills/glcli" ~/.claude/skills/glcli
