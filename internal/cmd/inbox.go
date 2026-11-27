@@ -19,6 +19,8 @@ type inboxFlags struct {
 	maxBody int
 	ignore  []string
 	include []string
+	// cache is set by inbox wait, which collects again and again.
+	cache *inbox.Cache
 }
 
 var validRoles = []string{"review", "authored", "todo"}
@@ -75,6 +77,7 @@ func collectInbox(ctx context.Context, rt *cli.Runtime, f inboxFlags) (*inboxRes
 			Todo:     slices.Contains(f.roles, "todo"),
 		},
 		MaxBodyChars: f.maxBody,
+		Cache:        f.cache,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -180,7 +183,10 @@ Pass the "checked_at" of the previous inbox or inbox wait as --since so
 that nothing is missed between two commands.
 
 It polls every --interval (2m), keeps trying while GitLab cannot be
-reached, and has no time limit unless --timeout. Prints what "inbox"
+reached, and has no time limit unless --timeout. Between two polls, a
+merge request whose updated_at did not change is not read again (my own
+ones: only their pipeline and merge status), except once every 20
+minutes, and right after a change. Prints what "inbox"
 prints; on timeout, items is [], timed_out is true, and checked_at is the
 --since to wait again with. Exit codes: 0 (also on timeout), 1 on error,
 130 when interrupted.`,
@@ -200,6 +206,7 @@ prints; on timeout, items is [], timed_out is true, and checked_at is the
 			if since.IsZero() {
 				since = rt.Now().Round(0).Truncate(time.Second)
 			}
+			f.cache = inbox.NewCache(rt.Now)
 			var res *inboxResult
 			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
 				rt.ResetWarnings()

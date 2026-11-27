@@ -61,6 +61,10 @@ type Options struct {
 	People       mr.People
 	Roles        Roles
 	MaxBodyChars int
+	// Cache, when set, is where a process that calls Collect again and
+	// again (inbox wait) keeps what it read of the merge requests that
+	// have not changed. Without it, everything is read each time.
+	Cache *Cache
 }
 
 // Result is what Collect found.
@@ -113,6 +117,8 @@ func Collect(ctx context.Context, c *gitlab.Client, o Options) (*Result, error) 
 		}
 	}
 
+	// After the lists, before the merge requests: see Cache.
+	now := o.Cache.start()
 	// Asked at most once, and only if a merge request needs the answer.
 	trusted := sync.OnceValue(func() bool { return patchIDsTrusted(ctx, c) })
 	items := make([]Item, len(mrs))
@@ -125,8 +131,7 @@ func Collect(ctx context.Context, c *gitlab.Client, o Options) (*Result, error) 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			project := projectOf(x.m)
-			s, err := mr.Fetch(ctx, c, ref.MR{Host: o.Host, Project: project, IID: x.m.IID})
+			s, err := o.Cache.snapshot(ctx, c, o.Host, x.m, x.kind, me, now)
 			if err != nil {
 				errs[i] = err
 				return
@@ -139,6 +144,11 @@ func Collect(ctx context.Context, c *gitlab.Client, o Options) (*Result, error) 
 		}()
 	}
 	wg.Wait()
+	listed := make([]gitlab.MergeRequest, len(mrs))
+	for i, x := range mrs {
+		listed[i] = x.m
+	}
+	o.Cache.keep(o.Host, listed)
 	byURL := map[string]int{}
 	for i, err := range errs {
 		if err != nil {
