@@ -87,7 +87,7 @@ type pipelineTarget struct {
 	unchecked int
 	// fork is the pipeline id as the merge request reports it, when it
 	// runs in the fork the merge request comes from: project is then the
-	// fork (see pipeline.Found).
+	// numeric ID of the fork (see pipeline.Found).
 	fork *pipeline.Summary
 }
 
@@ -128,7 +128,7 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 	// fork while the pipeline of an older commit ran in the parent project.
 	t.project, t.fork = t.mr.Project, found.Fork
 	if t.fork != nil {
-		t.project = t.fork.Project
+		t.project = found.ForkProject
 	}
 	return nil
 }
@@ -138,7 +138,7 @@ func (t *pipelineTarget) resolve(ctx context.Context, sha string) error {
 // what the merge request says of it, with a warning.
 func (t *pipelineTarget) collect(ctx context.Context, o pipeline.Options) (*pipeline.Report, error) {
 	r, err := pipeline.Collect(ctx, t.client, t.project, t.id, o)
-	if t.fork != nil && t.fork.ID == t.id && pipeline.Denied(err) {
+	if t.fork != nil && pipeline.Denied(err) {
 		return pipeline.FromMR(*t.fork, err), nil
 	}
 	return r, err
@@ -422,6 +422,9 @@ pipeline), 1 on error, 130 when interrupted.`,
 				case last == nil:
 					// GitLab named this pipeline and never let it be read.
 					last = &pipeline.Report{Pipeline: pipeline.Summary{ID: t.id, Project: t.project}, Running: true}
+					if t.fork != nil {
+						last.Pipeline = *t.fork
+					}
 					rt.Warnf("pipeline %d could not be read: %v", t.id, err)
 				default:
 					// What the last poll saw, without the jobs: it must

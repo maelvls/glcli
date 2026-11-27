@@ -30,14 +30,12 @@ func forkPipelineRef(id, projectID int, sha, status string, withURL bool) string
 // forkMR is the merge request from a fork. Its head pipeline (7) runs in
 // the fork, as does the pipeline of the previous commit (6); a member of
 // the parent project ran pipeline 5 there, for the previous commit too.
-// fork is how the API names the fork: its path when the pipelines have a
-// web_url, else its ID. status is asked each time GitLab tells the status
-// of pipeline 7, readable each time something of the fork is asked.
+// fork is how the API is asked for the fork: by its ID, with or without a
+// web_url in what the merge request reports. status is asked each time
+// GitLab tells the status of pipeline 7, readable each time something of
+// the fork is asked.
 func forkMR(withURL bool, status func() string, readable func() bool) (answers func(path string) (string, int), fork string) {
 	fork = "projects/2"
-	if withURL {
-		fork = "projects/contributor/project"
-	}
 	return func(path string) (string, int) {
 		if strings.HasPrefix(path, fork+"/") && !readable() {
 			return `{"message":"404 Project Not Found"}`, 404
@@ -104,7 +102,7 @@ var forkCommands = [][]string{
 func TestPipelineOfAMergeRequestFromAFork(t *testing.T) {
 	for _, withURL := range []bool{true, false} {
 		for _, args := range forkCommands {
-			name := args[1] + map[bool]string{true: ", fork known by its path", false: ", fork known by its ID"}[withURL]
+			name := args[1] + map[bool]string{true: ", pipelines with a web_url", false: ", pipelines without web_url"}[withURL]
 			t.Run(name, func(t *testing.T) {
 				read := 0
 				status := func() string {

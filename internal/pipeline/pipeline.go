@@ -46,6 +46,8 @@ type FailedJob struct {
 	AllowFailure  bool   `json:"allow_failure,omitempty"`
 	// Log is the end of the job's log, without colours and section markers.
 	Log string `json:"log,omitempty"`
+	// api names the project in API requests (see node).
+	api string
 }
 
 // Report is a pipeline and its downstream pipelines.
@@ -85,7 +87,13 @@ func Collect(ctx context.Context, c *gitlab.Client, project string, id int, o Op
 		return nil, err
 	}
 	r := &Report{Pipeline: summary(p.PipelineRef, project)}
-	if err := walk(ctx, c, r, r.Pipeline, project, 0, o); err != nil {
+	root := node{Summary: r.Pipeline, api: project, shown: project}
+	if _, err := strconv.Atoi(project); err == nil {
+		// Named by its ID, as the fork of a merge request is: the failed
+		// jobs name it as the pipeline does, by its path.
+		root.shown = r.Pipeline.Project
+	}
+	if err := walk(ctx, c, r, root, o); err != nil {
 		return nil, err
 	}
 	r.Running = r.Running || !mr.Finished(p.Status)
@@ -114,8 +122,22 @@ func projectFromURL(u string) string {
 	return p
 }
 
-// walk adds to r the failed jobs of the pipeline p, read from project (a
-// path or a numeric ID), and the pipelines downstream of it.
+// node is a pipeline of the tree a report is about.
+type node struct {
+	Summary
+	// api names its project in API requests. For a downstream pipeline,
+	// and for a pipeline in the fork of a merge request, that is the
+	// numeric ID GitLab gives (project_id), not the path found in web_url,
+	// which is for display: on an instance served under a relative URL
+	// (https://host/gitlab/group/project/-/pipelines/1), there is more in
+	// it than the path of the project.
+	api string
+	// shown names its project in the failed jobs.
+	shown string
+}
+
+// walk adds to r the failed jobs of the pipeline n and the pipelines
+// downstream of it.
 //
 // A downstream pipeline may be in a project the token cannot read: GitLab
 // then refuses its jobs and its trigger jobs (Denied). That does not fail
@@ -124,9 +146,9 @@ func projectFromURL(u string) string {
 // jobs of its parent; it is not followed further, and a warning says what
 // is missing. The same refusal for the pipeline the report is about
 // (depth 0) is an error, as is any other error for any pipeline.
-func walk(ctx context.Context, c *gitlab.Client, r *Report, p Summary, project string, depth int, o Options) error {
-	id := p.ID
-	base := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id)
+func walk(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) error {
+	id, depth := n.ID, n.Depth
+	base := gitlab.Project(n.api) + "/pipelines/" + strconv.Itoa(id)
 	var (
 		missing []string
 		denied  error
@@ -143,7 +165,7 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, p Summary, project s
 		return true
 	}
 	if !o.StatusOnly {
-		if err := failedJobs(ctx, c, r, project, id, o); err != nil && !refused(err, missingJobs) {
+		if err := failedJobs(ctx, c, r, n, o); err != nil && !refused(err, missingJobs) {
 			return err
 		}
 	}
@@ -160,7 +182,7 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, p Summary, project s
 		r.Truncated = r.Truncated || truncated
 	}
 	if denied != nil {
-		r.Warnings = append(r.Warnings, unreadable(p, missing, denied))
+		r.Warnings = append(r.Warnings, unreadable(n.Summary, missing, denied))
 	}
 	for _, b := range bridges {
 		if b.DownstreamPipeline == nil {
@@ -170,17 +192,18 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, p Summary, project s
 			continue
 		}
 		dp := b.DownstreamPipeline
-		dproject := projectFromURL(dp.WebURL)
-		if dproject == "" {
-			dproject = strconv.Itoa(dp.ProjectID)
-		}
-		s := summary(*dp, dproject)
+		// Shown by the path in its web_url, or else by its ID.
+		s := summary(*dp, strconv.Itoa(dp.ProjectID))
 		s.Bridge, s.Parent, s.Depth = b.Name, id, depth+1
 		r.Downstream = append(r.Downstream, s)
 		if !mr.Finished(dp.Status) {
 			r.Running = true
 		}
-		if err := walk(ctx, c, r, s, dproject, depth+1, o); err != nil {
+		down := node{Summary: s, api: s.Project, shown: s.Project}
+		if dp.ProjectID != 0 {
+			down.api = strconv.Itoa(dp.ProjectID)
+		}
+		if err := walk(ctx, c, r, down, o); err != nil {
 			return err
 		}
 	}
@@ -208,8 +231,8 @@ func unreadable(p Summary, missing []string, err error) string {
 // for these only (scope[]=failed): a pipeline can have a thousand jobs. A
 // job that failed and was retried is not among them: without
 // include_retried, GitLab lists the latest run of each job.
-func failedJobs(ctx context.Context, c *gitlab.Client, r *Report, project string, id int, o Options) error {
-	path := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id) + "/jobs"
+func failedJobs(ctx context.Context, c *gitlab.Client, r *Report, n node, o Options) error {
+	path := gitlab.Project(n.api) + "/pipelines/" + strconv.Itoa(n.ID) + "/jobs"
 	jobs, truncated, err := gitlab.GetAll[gitlab.Job](ctx, c, path, url.Values{"scope[]": {"failed"}}, 10)
 	if err != nil {
 		return err
@@ -225,7 +248,8 @@ func failedJobs(ctx context.Context, c *gitlab.Client, r *Report, project string
 		}
 		r.FailedJobs = append(r.FailedJobs, FailedJob{
 			ID: j.ID, Name: j.Name, Stage: j.Stage, Status: j.Status, URL: j.WebURL,
-			Pipeline: id, Project: project, FailureReason: j.FailureReason, AllowFailure: j.AllowFailure,
+			Pipeline: n.ID, Project: n.shown, FailureReason: j.FailureReason, AllowFailure: j.AllowFailure,
+			api: n.api,
 		})
 	}
 	return nil
@@ -303,7 +327,7 @@ func addLogs(ctx context.Context, c *gitlab.Client, jobs []FailedJob, lines int)
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			// Lines are rarely longer than 300 bytes; read a generous tail.
-			raw, err := c.GetText(ctx, gitlab.Project(jobs[i].Project)+"/jobs/"+strconv.Itoa(jobs[i].ID)+"/trace", int64(lines)*400+32*1024)
+			raw, err := c.GetText(ctx, gitlab.Project(jobs[i].api)+"/jobs/"+strconv.Itoa(jobs[i].ID)+"/trace", int64(lines)*400+32*1024)
 			if err != nil {
 				errs[i] = err
 				return
@@ -362,10 +386,13 @@ type Found struct {
 	// Fork is the pipeline ID as the merge request reports it, when it
 	// belongs to another project than the merge request: a merge request
 	// from a fork has its pipelines in the fork (its source project),
-	// except those a member of the parent project ran there. The pipeline
-	// is to be read from Fork.Project. Nil when the pipeline is in the
-	// project of the merge request.
+	// except those a member of the parent project ran there. Nil when the
+	// pipeline is in the project of the merge request.
 	Fork *Summary
+	// ForkProject names the project of Fork in API requests, by its
+	// numeric ID: the pipeline is to be read from there. Fork.Project,
+	// the path in the pipeline's web_url, is for display.
+	ForkProject string
 }
 
 // ForMR finds the pipeline of a merge request for the commit sha (full or
@@ -392,10 +419,10 @@ func ForMR(ctx context.Context, c *gitlab.Client, r ref.MR, sha string) (Found, 
 	// take makes p the pipeline found. GitLab gives the project of each
 	// pipeline (project_id), in head_pipeline as in the list.
 	take := func(p gitlab.PipelineRef) {
-		found.ID, found.Fork = p.ID, nil
-		if p.ProjectID != 0 && m.ProjectID != 0 && p.ProjectID != m.ProjectID {
+		found.ID, found.Fork, found.ForkProject = p.ID, nil, ""
+		if p.ProjectID != 0 && p.ProjectID != m.ProjectID {
 			s := summary(p, strconv.Itoa(p.ProjectID))
-			found.Fork = &s
+			found.Fork, found.ForkProject = &s, strconv.Itoa(p.ProjectID)
 		}
 	}
 	unconfirmed, unchecked := 0, 0

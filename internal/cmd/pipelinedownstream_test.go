@@ -8,11 +8,12 @@ import (
 )
 
 // The pipeline of these tests (7, of group/project!1) has succeeded. Its
-// trigger job "e2e" started pipeline 20 in group/e2e, whose trigger job
-// "publish" started pipeline 30 in group/secret.
+// trigger job "e2e" started pipeline 20 in group/e2e (project 6), whose
+// trigger job "publish" started pipeline 30 in group/secret (project 8).
+// Downstream pipelines are asked for by the ID of their project.
 const (
-	e2ePipeline    = "projects/group/e2e/pipelines/20"
-	secretPipeline = "projects/group/secret/pipelines/30"
+	e2ePipeline    = "projects/6/pipelines/20"
+	secretPipeline = "projects/8/pipelines/30"
 )
 
 // triggered answers for that tree. e2eStatus is asked each time the
@@ -33,7 +34,7 @@ func triggered(e2eStatus func() string) func(path string) (string, int) {
 			return `[{"id":200,"name":"e2e-1","stage":"test","status":"failed"}]`, 200
 		case e2ePipeline + "/bridges":
 			return `[{"id":21,"name":"publish","status":"success","downstream_pipeline":{"id":30,"project_id":8,"status":"success","web_url":"https://gitlab.com/group/secret/-/pipelines/30"}}]`, 200
-		case "projects/group/e2e/jobs/200/trace":
+		case "projects/6/jobs/200/trace":
 			return "$ make e2e\nFAIL: TestE2E\n", 200
 		case secretPipeline + "/jobs", secretPipeline + "/bridges":
 			return `[]`, 200

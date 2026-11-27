@@ -14,8 +14,8 @@ import (
 // pipeline 200 in group/e2e (trigger job "e2e") and pipeline 300 in its
 // own project (trigger job "deploy").
 const (
-	e2eJobs    = "projects/group/e2e/pipelines/200/jobs"
-	e2eBridges = "projects/group/e2e/pipelines/200/bridges"
+	e2eJobs    = "projects/6/pipelines/200/jobs"
+	e2eBridges = "projects/6/pipelines/200/bridges"
 )
 
 func answer(status int) func(url.Values) (int, string) {
@@ -83,7 +83,7 @@ func TestCollectDownstreamTriggerJobsRefused(t *testing.T) {
 	}
 	has(t, r, []string{who, "HTTP 403", "Its status (failed) is the one its trigger job reports", "its own downstream pipelines"}, "its failed jobs", "It failed")
 	// The pipeline after the unreadable one is still followed.
-	if len(f.asked("projects/group/project/pipelines/300/bridges")) != 1 {
+	if len(f.asked("projects/5/pipelines/300/bridges")) != 1 {
 		t.Error("the trigger jobs of pipeline 300 were not read")
 	}
 }

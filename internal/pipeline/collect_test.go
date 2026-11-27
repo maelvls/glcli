@@ -214,11 +214,12 @@ func jobsRoute(jobs ...fakeJob) func(url.Values) (int, string) {
 
 // tree is a pipeline (100, failed) with two downstream pipelines: 200 in
 // another project (status given) and 300 in the same project (success).
+// Downstream pipelines are asked for by the ID of their project.
 func tree(status200 string) *fake {
 	const (
 		parent = "projects/group/project/pipelines/100"
-		e2e    = "projects/group/e2e/pipelines/200"
-		deploy = "projects/group/project/pipelines/300"
+		e2e    = "projects/6/pipelines/200"
+		deploy = "projects/5/pipelines/300"
 	)
 	return &fake{routes: map[string]func(url.Values) (int, string){
 		parent: ok(`{"id":100,"status":"failed","web_url":"https://gitlab.com/group/project/-/pipelines/100"}`),
@@ -242,8 +243,8 @@ func tree(status200 string) *fake {
 
 var treeJobs = []string{
 	"projects/group/project/pipelines/100/jobs",
-	"projects/group/e2e/pipelines/200/jobs",
-	"projects/group/project/pipelines/300/jobs",
+	"projects/6/pipelines/200/jobs",
+	"projects/5/pipelines/300/jobs",
 }
 
 func TestCollectAsksGitLabForFailedJobsOnly(t *testing.T) {
@@ -318,7 +319,7 @@ func TestCollectWarnsAboutLogsItCannotRead(t *testing.T) {
 	f.routes["projects/group/project/jobs/2/trace"] = ok("$ make test\nFAIL: TestX\n")
 	// No log for job 3 (lint): a 404, as for an erased job.
 	// The token cannot read the jobs of the downstream project.
-	f.routes["projects/group/e2e/jobs/20/trace"] = func(url.Values) (int, string) { return 403, `{"message":"403 Forbidden"}` }
+	f.routes["projects/6/jobs/20/trace"] = func(url.Values) (int, string) { return 403, `{"message":"403 Forbidden"}` }
 	r, err := Collect(context.Background(), f.client(t), "group/project", 100, Options{Downstream: true, MaxDepth: 4, IncludeAllowed: true, LogLines: 10})
 	if err != nil {
 		t.Fatal(err)

@@ -23,12 +23,12 @@ func fromFork() *fake {
 			`","source":"merge_request_event","web_url":"https://gitlab.com/` + path + `/-/pipelines/` + strconv.Itoa(id) + `"}`
 	}
 	return &fake{routes: map[string]func(url.Values) (int, string){
-		mrPath:                ok(`{"iid":1,"project_id":5,"sha":"` + headSHA + `","head_pipeline":` + in(95, 9, headSHA, "running") + `}`),
-		mrPath + "/pipelines": ok(`[` + in(95, 9, headSHA, "running") + `,` + in(93, 5, oldSHA, "success") + `,` + in(90, 9, oldSHA, "failed") + `]`),
-		"projects/contributor/project/pipelines/95":         ok(in(95, 9, headSHA, "failed")),
-		"projects/contributor/project/pipelines/95/jobs":    jobsRoute(fakeJob{id: 1, name: "test", status: "failed"}),
-		"projects/contributor/project/pipelines/95/bridges": ok(`[]`),
-		"projects/contributor/project/jobs/1/trace":         ok("$ make test\nFAIL\n"),
+		mrPath:                            ok(`{"iid":1,"project_id":5,"sha":"` + headSHA + `","head_pipeline":` + in(95, 9, headSHA, "running") + `}`),
+		mrPath + "/pipelines":             ok(`[` + in(95, 9, headSHA, "running") + `,` + in(93, 5, oldSHA, "success") + `,` + in(90, 9, oldSHA, "failed") + `]`),
+		"projects/9/pipelines/95":         ok(in(95, 9, headSHA, "failed")),
+		"projects/9/pipelines/95/jobs":    jobsRoute(fakeJob{id: 1, name: "test", status: "failed"}),
+		"projects/9/pipelines/95/bridges": ok(`[]`),
+		"projects/9/jobs/1/trace":         ok("$ make test\nFAIL\n"),
 	}}
 }
 
@@ -39,8 +39,8 @@ func TestForMRTellsTheProjectOfAPipelineInTheFork(t *testing.T) {
 			t.Fatalf("ForMR(%q) = %+v, %v; want the pipeline 95, in the fork", sha, got, err)
 		}
 		want := Summary{ID: 95, Project: "contributor/project", Status: "running", URL: "https://gitlab.com/contributor/project/-/pipelines/95", SHA: headSHA, Ref: "feature", Source: "merge_request_event"}
-		if *got.Fork != want {
-			t.Errorf("ForMR(%q).Fork = %+v, want %+v", sha, *got.Fork, want)
+		if *got.Fork != want || got.ForkProject != "9" {
+			t.Errorf("ForMR(%q).Fork = %+v, to read from %q; want %+v, from 9", sha, *got.Fork, got.ForkProject, want)
 		}
 	}
 }
@@ -62,7 +62,7 @@ func TestForMROlderPipelineInTheFork(t *testing.T) {
 		{"id":90,"project_id":9,"sha":"` + oldSHA + `","ref":"feature","status":"failed"}]`)
 	got, err := ForMR(context.Background(), f.client(t), testMR, oldSHA)
 	// No web_url: the fork is known by its ID.
-	if err != nil || got.ID != 90 || got.Fork == nil || got.Fork.Project != "9" || got.Fork.ID != 90 || got.Fork.Status != "failed" {
+	if err != nil || got.ID != 90 || got.Fork == nil || got.ForkProject != "9" || got.Fork.Project != "9" || got.Fork.ID != 90 || got.Fork.Status != "failed" {
 		t.Errorf("ForMR = %+v (fork %+v), %v; want the pipeline 90, in project 9", got, got.Fork, err)
 	}
 }
@@ -80,7 +80,7 @@ func TestForMRProjectOfTheNewestPipelineOfTheCommit(t *testing.T) {
 		{"id":90,"project_id":5,"sha":"` + oldSHA + `","ref":"refs/merge-requests/1/head","status":"failed","source":"merge_request_event"},
 		{"id":93,"project_id":9,"sha":"` + oldSHA + `","ref":"feature","status":"success","source":"push"}]`)
 	got, err := ForMR(context.Background(), f.client(t), testMR, oldSHA)
-	if err != nil || got.ID != 93 || got.Fork == nil || got.Fork.ID != 93 || got.Fork.Project != "9" {
+	if err != nil || got.ID != 93 || got.Fork == nil || got.Fork.ID != 93 || got.ForkProject != "9" {
 		t.Errorf("ForMR = %+v (fork %+v), %v; want the pipeline 93, in project 9", got, got.Fork, err)
 	}
 	// The other way round: the newest is in the parent project.
@@ -115,7 +115,7 @@ func TestForMRMergedResultsOfAForkMergeRequest(t *testing.T) {
 }
 
 // Collect reads everything from the project it is given: for a pipeline
-// in a fork, the fork.
+// in a fork, the fork, named by its ID. The result names it by its path.
 func TestCollectReadsThePipelineFromTheFork(t *testing.T) {
 	f := fromFork()
 	c := f.client(t)
@@ -123,7 +123,7 @@ func TestCollectReadsThePipelineFromTheFork(t *testing.T) {
 	if err != nil || found.Fork == nil {
 		t.Fatalf("ForMR = %+v, %v", found, err)
 	}
-	r, err := Collect(context.Background(), c, found.Fork.Project, found.ID, Options{Downstream: true, MaxDepth: 4, LogLines: 10})
+	r, err := Collect(context.Background(), c, found.ForkProject, found.ID, Options{Downstream: true, MaxDepth: 4, LogLines: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestCollectReadsThePipelineFromTheFork(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for path := range f.queries {
-		if !strings.HasPrefix(path, "projects/contributor/project/") && !strings.Contains(path, "/merge_requests/") {
+		if !strings.HasPrefix(path, "projects/9/") && !strings.Contains(path, "/merge_requests/") {
 			t.Errorf("asked outside the fork: %s", path)
 		}
 	}
