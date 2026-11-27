@@ -366,23 +366,28 @@ func followMR(ctx context.Context, rt *cli.Runtime, st *stream, m *mrContext, d 
 		if err != nil {
 			return false, err
 		}
-		st.answered()
 		if err := prev.Check(s); err != nil {
 			return false, usageError{err}
 		}
+		// answered is only called once every request of the poll has
+		// succeeded, so that the stream and PollNotify agree on whether
+		// GitLab answers (a comparison that fails keeps the outage).
 		if s.Unsettled {
+			st.answered()
 			return false, nil // a push is landing: look again next time
 		}
 		// At most two polls per diff version (see AwaitsPatchID): the
 		// events that came with the push wait with it, and come out
 		// together in the next line.
 		if d.AwaitsPatchID(ctx, *prev, s) {
+			st.answered()
 			return false, nil
 		}
 		events, err := d.Events(ctx, *prev, s)
 		if err != nil {
 			return false, err
 		}
+		st.answered()
 		triggered := triggeredBy(events, o.on, o.includeMine)
 		final := s.MR.State == "merged" || s.MR.State == "closed"
 		if len(triggered) == 0 && !final {

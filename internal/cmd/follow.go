@@ -53,8 +53,9 @@ func (s *stream) outage(err error) {
 	s.print(streamLine{Type: "warning", Message: "cannot reach GitLab, trying again: " + err.Error()})
 }
 
-// answered is called when GitLab answers a poll: after an outage, it
-// prints that GitLab answers again, before the results of that poll.
+// answered is called once every request of a poll has succeeded (when
+// PollNotify, too, sees the outage end): after an outage, it prints that
+// GitLab answers again, before the results of that poll.
 func (s *stream) answered() {
 	if s.down {
 		s.down = false
