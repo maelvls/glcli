@@ -129,7 +129,12 @@ func Collect(ctx context.Context, c *gitlab.Client, o Options) (*Result, error) 
 				return
 			}
 			if x.kind == "review" {
-				items[i] = reviewItem(s, o.People)
+				items[i] = reviewItemWith(s, o.People, func(seen, newest gitlab.Version) bool {
+					// Any doubt, a failed call included, is "not the
+					// same": the push stays in the inbox.
+					same, known, err := mr.SamePatch(ctx, c, s.MR.ProjectID, seen, newest)
+					return err == nil && known && same
+				})
 			} else {
 				items[i] = authoredItem(s, o.People)
 			}
@@ -261,7 +266,16 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 	return a
 }
 
+// reviewItem counts every push after my last action as new commits.
 func reviewItem(s *mr.Snapshot, p mr.People) Item {
+	return reviewItemWith(s, p, nil)
+}
+
+// reviewItemWith leaves out of new_commits the pushes that only rebased
+// what I saw. same reports whether two diff versions carry the same
+// changes, false when in doubt; it is only asked about a merge request
+// that would get new_commits.
+func reviewItemWith(s *mr.Snapshot, p mr.People, same func(seen, newest gitlab.Version) bool) Item {
 	it := base(s, "review", p)
 	a := analyse(s, p)
 	it.myLast = a.myLast
@@ -270,13 +284,31 @@ func reviewItem(s *mr.Snapshot, p mr.People) Item {
 		it.add("review_requested", a.reviewReqAt)
 	case a.myLast.IsZero() && !it.ApprovedByMe:
 		it.add("review_requested", s.MR.CreatedAt)
-	case !it.ApprovedByMe && a.pushedAt.After(a.myLast):
+	case !it.ApprovedByMe && a.pushedAt.After(a.myLast) && !rebasedOnly(s, a.myLast, same):
 		it.add("new_commits", a.pushedAt)
 	}
 	if !a.repliesAt.IsZero() {
 		it.add("new_replies", a.repliesAt)
 	}
 	return it
+}
+
+// rebasedOnly reports whether the pushes since my last action left the
+// changes as I saw them: the diff version that was the head back then and
+// the newest one carry the same patch. Any doubt is false: a push landed
+// while fetching, or my last action is older than every version fetched.
+func rebasedOnly(s *mr.Snapshot, myLast time.Time, same func(seen, newest gitlab.Version) bool) bool {
+	if same == nil || s.Unsettled {
+		return false
+	}
+	// Versions are newest first: the first one not after my last action
+	// is what I saw.
+	for _, v := range s.Versions {
+		if !v.CreatedAt.After(myLast) {
+			return same(v, s.Versions[0])
+		}
+	}
+	return false
 }
 
 func authoredItem(s *mr.Snapshot, p mr.People) Item {
