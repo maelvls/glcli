@@ -131,6 +131,7 @@ GLCLI_COMMAND_TIMEOUT_MS (30000; the wait commands have no timeout).`,
 	root.PersistentFlags().StringVarP(&rt.RepoFlag, "repo", "R", "", "Project for short references such as !123: group/project or its URL")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	root.AddCommand(newMR(rt), newPipeline(rt), newInbox(rt), newAuth(rt), newSkills(rt))
+	addVersion(root, rt)
 	return root
 }
 
