@@ -93,13 +93,25 @@ func commandTimeout() time.Duration {
 	return defaultCommandTimeout
 }
 
-// rejectedTokenHint says what to do after an HTTP 401, naming the host
-// that answered it (as glab calls it) when the error tells.
+// rejectedTokenHint says what to do after an HTTP 401: log in again with
+// glab on the host that answered (as glab calls it, when the error
+// tells), or change the environment variable when the token came from
+// one, since logging in would change nothing then. A 401 from another
+// host, after a redirect, says nothing about the token: it was not sent.
 func rejectedTokenHint(err error) string {
-	host := "<host>"
+	host, source := "<host>", ""
 	var apiErr *gitlab.APIError
-	if errors.As(err, &apiErr) && apiErr.Host != "" {
-		host = apiErr.Host
+	if errors.As(err, &apiErr) {
+		if apiErr.RedirectedTo != "" {
+			return "the request was redirected to " + apiErr.RedirectedTo + ", where the token is not sent: this 401 does not say that the token was rejected"
+		}
+		if apiErr.Host != "" {
+			host = apiErr.Host
+		}
+		source = apiErr.TokenSource
+	}
+	if strings.HasPrefix(source, "$") {
+		return "the token from " + source + " was rejected by " + host + ": unset it (glcli then reads glab's config) or replace it; `glcli auth status` shows where each token comes from"
 	}
 	return "the token was rejected: run `glab auth login --hostname " + host + "` (glcli reads glab's config), or `glcli auth status`"
 }
