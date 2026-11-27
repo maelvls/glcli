@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -12,10 +13,19 @@ type User struct {
 	Name     string `json:"name"`
 }
 
-var botUsername = regexp.MustCompile(`^(project|group)_\d+_bot(_[0-9a-z]+)?$|(^|[-_])bot$|^ghost$|^gitlab-bot$`)
+// botUsername ignores case, as GitLab does for usernames.
+var botUsername = regexp.MustCompile(`(?i)` + strings.Join([]string{
+	`^(project|group)_\d+_bot(_[0-9a-z]+)?$`, // project and group access tokens
+	`^service_account_`,                      // service accounts, as GitLab names them by default
+	`(^|[-_])bot$`,                           // renovate-bot
+	`\[bot\]$`,                               // dependabot[bot]
+	`^(ghost|gitlab-bot|gitlabduo|gitlab-duo|dependabot|renovate)$`,
+}, "|"))
 
 // IsBot reports whether username looks like a machine: project and group
-// access tokens (project_123_bot_abc), "*-bot" accounts, and the ghost user.
+// access tokens (project_123_bot_abc), service accounts
+// (service_account_…), "*-bot" and "name[bot]" accounts, the ghost user,
+// and a few bots known by name (GitLab Duo, Dependabot, Renovate).
 func IsBot(username string) bool {
 	return botUsername.MatchString(username)
 }
