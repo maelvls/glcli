@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maelvls/glcli/internal/cli"
 	"github.com/maelvls/glcli/internal/pipeline"
@@ -59,18 +60,22 @@ func TestPipelineKeepsItsPipelineKey(t *testing.T) {
 	}
 }
 
+// noPipeline answers for a merge request whose head commit has no
+// pipeline.
+func noPipeline(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/merge_requests/1"):
+		fmt.Fprint(w, `{"id":10,"iid":1,"project_id":5,"sha":"abc"}`)
+	case strings.HasSuffix(r.URL.Path, "/merge_requests/1/pipelines"):
+		fmt.Fprint(w, `[]`)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 // The whole command, on a merge request whose head commit has no pipeline.
 func TestPipelineGetWithoutPipeline(t *testing.T) {
-	rt, stdout, stderr := fakeGitLab(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/merge_requests/1"):
-			fmt.Fprint(w, `{"id":10,"iid":1,"project_id":5,"sha":"abc"}`)
-		case strings.HasSuffix(r.URL.Path, "/merge_requests/1/pipelines"):
-			fmt.Fprint(w, `[]`)
-		default:
-			http.NotFound(w, r)
-		}
-	})
+	rt, stdout, stderr := fakeGitLab(t, noPipeline)
 	if code := run(rt, []string{"pipeline", "get", "group/project!1"}); code != 0 {
 		t.Fatalf("exit %d (stderr: %s)", code, stderr.String())
 	}
@@ -83,5 +88,30 @@ func TestPipelineGetWithoutPipeline(t *testing.T) {
 	}
 	if string(got["running"]) != "true" || string(got["sha"]) != `"abc"` || string(got["failed_jobs"]) != "[]" || len(got["hints"]) == 0 {
 		t.Errorf("want running, sha, an empty failed_jobs and a hint, got %s", stdout.String())
+	}
+}
+
+// "pipeline wait --timeout" when no pipeline was created in time. The
+// clock jumps an hour each time it is read, so the wait times out after
+// its first poll without sleeping.
+func TestPipelineWaitTimeoutWithoutPipeline(t *testing.T) {
+	rt, stdout, stderr := fakeGitLab(t, noPipeline)
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	rt.Now = func() time.Time {
+		now = now.Add(time.Hour)
+		return now
+	}
+	if code := run(rt, []string{"pipeline", "wait", "group/project!1", "--timeout", "30m"}); code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, stderr.String())
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, stdout.String())
+	}
+	if _, ok := got["pipeline"]; ok {
+		t.Errorf("there is no pipeline, got a \"pipeline\" key: %s", stdout.String())
+	}
+	if string(got["running"]) != "true" || string(got["sha"]) != `"abc"` || string(got["timed_out"]) != "true" || string(got["failed_jobs"]) != "[]" || len(got["hints"]) == 0 {
+		t.Errorf("want running, sha, timed_out, an empty failed_jobs and a hint, got %s", stdout.String())
 	}
 }
