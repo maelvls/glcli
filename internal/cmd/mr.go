@@ -211,7 +211,8 @@ usual exit code and message on stderr.`,
 		Example: `  glcli mr wait https://gitlab.com/group/project/-/merge_requests/123
   glcli mr wait group/project!123 --cursor eyJzIjoi... --timeout 2h
   glcli mr wait !123 --on state            # until merged or closed
-  glcli mr wait !123 --on comment --ignore-author renovate`,
+  glcli mr wait !123 --on comment --ignore-author renovate
+  glcli mr wait !123 --cursor eyJzIjoi... --follow   # one line per event, until merged`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			ctx := cmd.Context()

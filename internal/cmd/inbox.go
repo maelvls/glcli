@@ -216,7 +216,8 @@ line comes once per outage, and another when GitLab answers again. An
 error line comes before the usual exit code and message on stderr.`,
 		Example: `  glcli inbox wait
   glcli inbox wait --since 2026-11-26T14:30:00+01:00 --timeout 4h
-  glcli inbox wait --role review,todo --interval 5m`,
+  glcli inbox wait --role review,todo --interval 5m
+  glcli inbox wait --since 2026-11-26T14:30:00+01:00 --follow`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) (err error) {
 			ctx := cmd.Context()
