@@ -14,20 +14,24 @@ import (
 	"github.com/maelvls/glcli/internal/ref"
 )
 
-func TestPatchIDIgnoresLineNumbersAndContext(t *testing.T) {
+func TestPatchIDSeesLineNumbersAndContext(t *testing.T) {
 	before := []gitlab.VersionDiff{{OldPath: "a.go", NewPath: "a.go", Diff: "@@ -10,3 +10,3 @@ func f() {\n ctx\n-old\n+new\n ctx2\n"}}
-	rebased := []gitlab.VersionDiff{{OldPath: "a.go", NewPath: "a.go", Diff: "@@ -42,3 +42,3 @@ func g() {\n other ctx\n-old\n+new  \n changed ctx\n"}}
+	rebased := []gitlab.VersionDiff{{OldPath: "a.go", NewPath: "a.go", Diff: "@@ -10,3 +10,3 @@ func f() {\n ctx\n-old\n+new\n ctx2\n"}}
+	moved := []gitlab.VersionDiff{{OldPath: "a.go", NewPath: "a.go", Diff: "@@ -42,3 +42,3 @@ func g() {\n other ctx\n-old\n+new  \n changed ctx\n"}}
 	changed := []gitlab.VersionDiff{{OldPath: "a.go", NewPath: "a.go", Diff: "@@ -10,3 +10,3 @@\n ctx\n-old\n+newer\n"}}
 	a, _ := PatchID(before)
 	b, _ := PatchID(rebased)
 	c, _ := PatchID(changed)
 	if a != b {
-		t.Error("a rebase that keeps the changes must keep the patch ID")
+		t.Error("a rebase that keeps the diff must keep the patch ID")
+	}
+	if m, _ := PatchID(moved); a == m {
+		t.Error("the same lines elsewhere, in another context, must give a different patch ID")
 	}
 	if a == c {
 		t.Error("different changes must give a different patch ID")
 	}
-	if _, known := PatchID([]gitlab.VersionDiff{{NewPath: "big", TooLarge: true}}); known {
+	if _, known := PatchID([]gitlab.VersionDiff{{NewPath: "big", TooLarge: flag(true)}}); known {
 		t.Error("a too-large diff makes the patch ID unknown")
 	}
 }
@@ -146,7 +150,7 @@ func TestEventsSinceCursor(t *testing.T) {
 func TestRebaseOnlyPush(t *testing.T) {
 	c := fakeCompare(t, map[string]string{
 		"base1..head1": "@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n",
-		"base2..head2": "@@ -40,2 +40,2 @@\n other ctx\n-old\n+new\n",
+		"base2..head2": "@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n",
 	})
 	s := snapshot()
 	prev := NewCursor(s)

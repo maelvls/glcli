@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+{"events":[{"kind":"comment","at":"2026-11-26T10:03:00Z","by":"bob","comment":{"note_id":12,"discussion_id":"discussion-000000000012","body":"done, have a look","url":"https://gitlab.example/g/p/-/merge_requests/1#note_12"}}],"triggered_by":["comment"],"mr":{"ref":"g/p!1","url":"https://gitlab.example/g/p/-/merge_requests/1","title":"Add a thing","state":"opened","author":"alice","source_branch":"thing","target_branch":"main","head_sha":"head1","pushed_at":"2026-11-26T10:00:00Z","threads":{"resolvable":0,"unresolved":0},"last_comment_by_me_at":"2026-11-26T10:02:00Z","last_comment_by_others":{"author":"bob","at":"2026-11-26T10:03:00Z","url":"https://gitlab.example/g/p/-/merge_requests/1#note_12"},"updated_at":"2026-11-26T10:01:00Z","cursor":"eyJtIjoiMSExIiwicyI6ImhlYWQxIiwidiI6MSwiYiI6ImJhc2UxIiwicGkiOiJkNTA0NDEyZDViNmU2NzM5NjQ3ZTc1MmFmZjhlNDY4ZGRlMDkzZjJmIiwic3QiOiJvcGVuZWQiLCJuIjoxMn0"}}
+--- stderr
+glcli: cannot reach GitLab, trying again every 5s: GitLab GET projects/g%2Fp/merge_requests/1: HTTP 503: followGate
+glcli: GitLab answers again
