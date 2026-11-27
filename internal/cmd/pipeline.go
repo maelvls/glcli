@@ -116,7 +116,9 @@ group/project!123 or !123): then the pipeline of its head commit, or of
 --sha.
 
 Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
-"running" is true while any pipeline of the tree has not finished.`,
+"running" is true while any pipeline of the tree has not finished. While
+the commit of a merge request has no pipeline yet, it prints {sha,
+running: true, failed_jobs: []} without "pipeline".`,
 		Example: `  glcli pipeline get !123
   glcli pipeline get https://gitlab.com/group/project/-/pipelines/456 --log-lines 100`,
 		Args: cobra.ExactArgs(1),
