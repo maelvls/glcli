@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -84,7 +85,7 @@ func Collect(ctx context.Context, c *gitlab.Client, project string, id int, o Op
 		return nil, err
 	}
 	r := &Report{Pipeline: summary(p.PipelineRef, project)}
-	if err := walk(ctx, c, r, project, p.ID, 0, o); err != nil {
+	if err := walk(ctx, c, r, r.Pipeline, project, 0, o); err != nil {
 		return nil, err
 	}
 	r.Running = r.Running || !mr.Finished(p.Status)
@@ -113,21 +114,54 @@ func projectFromURL(u string) string {
 	return p
 }
 
-func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, depth int, o Options) error {
+// walk adds to r the failed jobs of the pipeline p, read from project (a
+// path or a numeric ID), and the pipelines downstream of it.
+//
+// A downstream pipeline may be in a project the token cannot read: GitLab
+// then refuses its jobs and its trigger jobs (Denied). That does not fail
+// the report: the pipeline is listed with the status the trigger job that
+// started it gives, which is read again at each call, with the trigger
+// jobs of its parent; it is not followed further, and a warning says what
+// is missing. The same refusal for the pipeline the report is about
+// (depth 0) is an error, as is any other error for any pipeline.
+func walk(ctx context.Context, c *gitlab.Client, r *Report, p Summary, project string, depth int, o Options) error {
+	id := p.ID
 	base := gitlab.Project(project) + "/pipelines/" + strconv.Itoa(id)
+	var (
+		missing []string
+		denied  error
+	)
+	// refused notes what GitLab refuses to show of a downstream pipeline.
+	refused := func(err error, what string) bool {
+		if depth == 0 || !Denied(err) {
+			return false
+		}
+		missing = append(missing, what)
+		if denied == nil {
+			denied = err
+		}
+		return true
+	}
 	if !o.StatusOnly {
-		if err := failedJobs(ctx, c, r, project, id, o); err != nil {
+		if err := failedJobs(ctx, c, r, project, id, o); err != nil && !refused(err, missingJobs) {
 			return err
 		}
 	}
-	if !o.Downstream || depth >= o.MaxDepth {
-		return nil
+	var bridges []gitlab.Bridge
+	if o.Downstream && depth < o.MaxDepth {
+		var (
+			truncated bool
+			err       error
+		)
+		bridges, truncated, err = gitlab.GetAll[gitlab.Bridge](ctx, c, base+"/bridges", nil, 5)
+		if err != nil && !refused(err, missingDownstream) {
+			return err
+		}
+		r.Truncated = r.Truncated || truncated
 	}
-	bridges, truncated, err := gitlab.GetAll[gitlab.Bridge](ctx, c, base+"/bridges", nil, 5)
-	if err != nil {
-		return err
+	if denied != nil {
+		r.Warnings = append(r.Warnings, unreadable(p, missing, denied))
 	}
-	r.Truncated = r.Truncated || truncated
 	for _, b := range bridges {
 		if b.DownstreamPipeline == nil {
 			if !mr.Finished(b.Status) && b.Status != "created" {
@@ -146,11 +180,28 @@ func walk(ctx context.Context, c *gitlab.Client, r *Report, project string, id, 
 		if !mr.Finished(dp.Status) {
 			r.Running = true
 		}
-		if err := walk(ctx, c, r, dproject, dp.ID, depth+1, o); err != nil {
+		if err := walk(ctx, c, r, s, dproject, depth+1, o); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// What a downstream pipeline that cannot be read lacks in the report.
+const (
+	missingJobs       = "its failed jobs"
+	missingDownstream = `its own downstream pipelines, which "pipeline wait" does not wait for`
+)
+
+// unreadable is the warning for the downstream pipeline p, of which
+// GitLab refused (err) to show what missing lists.
+func unreadable(p Summary, missing []string, err error) string {
+	w := fmt.Sprintf("the downstream pipeline %d (in %s, started by the trigger job %q of pipeline %d) could not be read: %v. Its status (%s) is the one its trigger job reports. Missing from this result: %s.",
+		p.ID, p.Project, p.Bridge, p.Parent, err, p.Status, strings.Join(missing, "; "))
+	if p.Status == "failed" && p.URL != "" && slices.Contains(missing, missingJobs) {
+		w += fmt.Sprintf(` It failed, and "failed_jobs" does not say why: see %s`, p.URL)
+	}
+	return w
 }
 
 // failedJobs adds the failed jobs of one pipeline to r. GitLab is asked

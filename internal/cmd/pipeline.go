@@ -201,7 +201,11 @@ group/project!123 or !123): then the pipeline of its head commit, or of
 --sha.
 
 Prints {pipeline, downstream, failed_jobs, running, allowed_failures}.
-"running" is true while any pipeline of the tree has not finished.`,
+"running" is true while any pipeline of the tree has not finished.
+
+A downstream pipeline that the token cannot read (HTTP 403 or 404) is
+still listed, with the status its trigger job reports: "warnings" then
+says what is missing, its failed jobs or its own downstream pipelines.`,
 		Example: `  glcli pipeline get !123
   glcli pipeline get https://gitlab.com/group/project/-/pipelines/456 --log-lines 100`,
 		Args: cobra.ExactArgs(1),
