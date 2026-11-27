@@ -232,12 +232,13 @@ it to appear.
 
 It does not wait for a pipeline that never comes: if GitLab has created
 none within --create-timeout (5m, counted again from each new head
-commit), it stops and prints {sha, no_pipeline: true, running: false,
-failed_jobs: []} without "pipeline". The commit then most likely has no
-pipeline at all: the project has no CI configuration, the push skipped CI
-([skip ci], or the ci.skip push option), or the rules of .gitlab-ci.yml
-create no pipeline for this change. --create-timeout 0 waits for it
-indefinitely.
+commit, and not while GitLab cannot be reached), it stops and prints
+"no_pipeline": true with the sha. Read that field first: nothing ran, so
+"running": false and an empty "failed_jobs" do not mean that CI passed.
+The commit then most likely has no pipeline at all: the project has no CI
+configuration, the push skipped CI ([skip ci], or the ci.skip push
+option), or the rules of .gitlab-ci.yml create no pipeline for this
+change. --create-timeout 0 waits for it indefinitely.
 
 It polls every --interval (30s), keeps trying while GitLab cannot be
 reached, and has no time limit unless --timeout; on timeout it prints the
@@ -273,6 +274,8 @@ pipeline), 1 on error, 130 when interrupted.`,
 				// until that pipeline has been read.
 				last   *pipeline.Report
 				lastID int
+				// lastSHA is the commit lastID was awaited for.
+				lastSHA string
 				// GitLab has had since createSince to create the pipeline
 				// of the commit createSHA.
 				createSHA   string
@@ -331,11 +334,14 @@ pipeline), 1 on error, 130 when interrupted.`,
 					switch {
 					case unconfirmed:
 						rt.Notef("cannot confirm that pipeline %d is the pipeline of %s (its merge commit cannot be read): waiting for it all the same", t.id, t.sha)
-					case lastID != 0:
+					case lastID != 0 && t.sha != lastSHA:
 						rt.Notef("now waiting for pipeline %d (new head %s)", t.id, t.sha)
+					case lastID != 0:
+						// A new pipeline of the same commit: someone ran it again.
+						rt.Notef("now waiting for pipeline %d", t.id)
 					}
 					// The report of another pipeline says nothing of this one.
-					last, lastID = nil, t.id
+					last, lastID, lastSHA = nil, t.id, t.sha
 				}
 				r, err := pipeline.Collect(ctx, t.client, t.project, t.id, statusOnly)
 				if err != nil {

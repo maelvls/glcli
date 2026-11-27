@@ -934,3 +934,44 @@ func TestPipelineShaThatMatchesNoPipeline(t *testing.T) {
 		})
 	}
 }
+
+// The note on stderr when another pipeline is waited on says "new head"
+// only when the head changed: a pipeline run again is on the same commit.
+func TestPipelineWaitNoteForANewPipeline(t *testing.T) {
+	for _, tt := range []struct {
+		name, newSHA, want string
+	}{
+		{"run again on the same commit", "aaa111", "glcli: now waiting for pipeline 8\n"},
+		{"new head", "bbb222", "glcli: now waiting for pipeline 8 (new head bbb222)\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				e     *waitEnv
+				start time.Time
+			)
+			old := onePipeline(func() string { return "running" })
+			e = newWaitEnv(t, func(path string) (string, int) {
+				if e.clock.peek().Sub(start) < time.Minute {
+					return old(path)
+				}
+				switch path {
+				case waitMR:
+					return `{"iid":1,"project_id":5,"sha":"` + tt.newSHA + `","head_pipeline":{"id":8,"sha":"` + tt.newSHA + `","ref":"refs/merge-requests/1/head","status":"success"}}`, 200
+				case "projects/group/project/pipelines/8":
+					return `{"id":8,"sha":"` + tt.newSHA + `","status":"success","web_url":"https://gitlab.com/group/project/-/pipelines/8"}`, 200
+				case "projects/group/project/pipelines/8/jobs", "projects/group/project/pipelines/8/bridges":
+					return `[]`, 200
+				}
+				return old(path)
+			})
+			start = e.clock.peek()
+			code, out := e.wait(t)
+			if id, _, _, _ := printed(t, e, out); code != 0 || id != 8 {
+				t.Fatalf("exit %d, want the pipeline 8, got %s (stderr: %s)", code, e.stdout.String(), e.stderr.String())
+			}
+			if e.stderr.String() != tt.want {
+				t.Errorf("stderr: %q, want %q", e.stderr.String(), tt.want)
+			}
+		})
+	}
+}
