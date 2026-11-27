@@ -5,12 +5,19 @@ import (
 	"testing"
 )
 
-// Adding a label writes a system note that starts with "added ", like a
-// push: it must not count as me acting on the merge request.
-func TestLabelIsNotMyAction(t *testing.T) {
+// Logging time (/spend, /estimate) writes a system note that starts with
+// "added ", like a push, and so did a label on old merge requests: none
+// of them is me acting on the merge request.
+func TestOtherAddedNotesAreNotMyAction(t *testing.T) {
 	// Reviewer since the creation: GitLab writes no "requested review
 	// from @me" note, so only my own actions can clear the request.
-	for _, body := range []string{"added ~123 label", "added 2 labels", `added ~"needs commit" label`} {
+	for _, body := range []string{
+		"added 1h of time spent at 2026-11-27 16:00:00 UTC",
+		"added time estimate of 1h",
+		"added ~123 label",
+		"added ~1 ~2 labels",
+		`added ~"needs commit" label`,
+	} {
 		got := reviewItem(snap("bob", note(1, "me", 3, body, true)), me)
 		if !slices.Equal(got.Reasons, []string{"review_requested"}) {
 			t.Errorf("%q: reasons = %v, want [review_requested]", body, got.Reasons)
@@ -19,11 +26,11 @@ func TestLabelIsNotMyAction(t *testing.T) {
 			t.Errorf("%q: myLast = %v, want zero", body, got.myLast)
 		}
 	}
-	// On my own merge request, a label I add after a comment does not
+	// On my own merge request, time I log after a comment does not
 	// answer the comment.
-	got := authoredItem(snap("me", note(1, "alice", 1, "looks wrong", false), note(2, "me", 3, "added ~123 label", true)), me)
+	got := authoredItem(snap("me", note(1, "alice", 1, "looks wrong", false), note(2, "me", 3, "added 1h of time spent at 2026-11-27 16:00:00 UTC", true)), me)
 	if !slices.Equal(got.Reasons, []string{"new_comments"}) {
-		t.Errorf("label after a comment: reasons = %v, want [new_comments]", got.Reasons)
+		t.Errorf("time spent after a comment: reasons = %v, want [new_comments]", got.Reasons)
 	}
 }
 
