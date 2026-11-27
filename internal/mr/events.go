@@ -334,42 +334,33 @@ func (d *Differ) newCommits(ctx context.Context, s *Snapshot, from string) ([]Co
 	return out, nil
 }
 
-// hash returns the patch ID of the changes between base and head.
+// hash returns the patch ID of the changes between base and head. It
+// reads them with the compare API rather than from the merge request's
+// diff versions: GitLab drops the files of every version but the latest
+// (state "without_files"), while it keeps the commits.
 func (d *Differ) hash(ctx context.Context, projectID int, base, head string) (patchHash, error) {
 	key := base + ".." + head
 	if h, ok := d.hashes[key]; ok {
 		return h, nil
 	}
-	h, err := comparePatch(ctx, d.Client, projectID, base, head)
-	if err != nil {
-		if gitlab.IsStatus(err, 404) {
-			return patchHash{}, nil // a commit is gone
-		}
-		return patchHash{}, err
-	}
-	if d.hashes == nil {
-		d.hashes = map[string]patchHash{}
-	}
-	d.hashes[key] = h
-	return h, nil
-}
-
-// comparePatch reads the changes between base and head and hashes them.
-// It reads them with the compare API rather than from the merge request's
-// diff versions: GitLab drops the files of every version but the latest
-// (state "without_files"), while it keeps the commits.
-func comparePatch(ctx context.Context, c *gitlab.Client, projectID int, base, head string) (patchHash, error) {
 	var cmp struct {
 		Diffs          []gitlab.VersionDiff `json:"diffs"`
 		CompareTimeout bool                 `json:"compare_timeout"`
 	}
 	q := url.Values{"from": {base}, "to": {head}, "straight": {"true"}}
-	if err := c.Get(ctx, "projects/"+strconv.Itoa(projectID)+"/repository/compare", q, &cmp); err != nil {
+	if err := d.Client.Get(ctx, "projects/"+strconv.Itoa(projectID)+"/repository/compare", q, &cmp); err != nil {
+		if gitlab.IsStatus(err, 404) {
+			return patchHash{}, nil // a commit is gone
+		}
 		return patchHash{}, err
 	}
 	h := patchHash{}
 	if !cmp.CompareTimeout {
 		h.sum, h.known = PatchID(cmp.Diffs)
 	}
+	if d.hashes == nil {
+		d.hashes = map[string]patchHash{}
+	}
+	d.hashes[key] = h
 	return h, nil
 }

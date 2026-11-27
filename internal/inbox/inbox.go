@@ -129,12 +129,7 @@ func Collect(ctx context.Context, c *gitlab.Client, o Options) (*Result, error) 
 				return
 			}
 			if x.kind == "review" {
-				items[i] = reviewItemWith(s, o.People, func(seen, newest gitlab.Version) bool {
-					// Any doubt, a failed call included, is "not the
-					// same": the push stays in the inbox.
-					same, known, err := mr.SamePatch(ctx, c, s.MR.ProjectID, seen, newest)
-					return err == nil && known && same
-				})
+				items[i] = reviewItem(s, o.People)
 			} else {
 				items[i] = authoredItem(s, o.People)
 			}
@@ -266,16 +261,7 @@ func analyse(s *mr.Snapshot, p mr.People) activity {
 	return a
 }
 
-// reviewItem counts every push after my last action as new commits.
 func reviewItem(s *mr.Snapshot, p mr.People) Item {
-	return reviewItemWith(s, p, nil)
-}
-
-// reviewItemWith leaves out of new_commits the pushes that only rebased
-// what I saw. same reports whether two diff versions carry the same
-// changes, false when in doubt; it is only asked about a merge request
-// that would get new_commits.
-func reviewItemWith(s *mr.Snapshot, p mr.People, same func(seen, newest gitlab.Version) bool) Item {
 	it := base(s, "review", p)
 	a := analyse(s, p)
 	it.myLast = a.myLast
@@ -284,8 +270,8 @@ func reviewItemWith(s *mr.Snapshot, p mr.People, same func(seen, newest gitlab.V
 		it.add("review_requested", a.reviewReqAt)
 	case a.myLast.IsZero() && !it.ApprovedByMe:
 		it.add("review_requested", s.MR.CreatedAt)
-	case !it.ApprovedByMe && a.pushedAt.After(a.myLast) && !rebasedOnly(s, a.myLast, same):
-		it.add("new_commits", a.pushedAt)
+	case !it.ApprovedByMe && a.pushedAt.After(a.myLast) && !rebasedOnly(s, p.Me, a.myLast):
+		it.add("new_commits", changedAt(s, a))
 	}
 	if !a.repliesAt.IsZero() {
 		it.add("new_replies", a.repliesAt)
@@ -293,22 +279,66 @@ func reviewItemWith(s *mr.Snapshot, p mr.People, same func(seen, newest gitlab.V
 	return it
 }
 
-// rebasedOnly reports whether the pushes since my last action left the
-// changes as I saw them: the diff version that was the head back then and
-// the newest one carry the same patch. Any doubt is false: a push landed
-// while fetching, or my last action is older than every version fetched.
-func rebasedOnly(s *mr.Snapshot, myLast time.Time, same func(seen, newest gitlab.Version) bool) bool {
-	if same == nil || s.Unsettled {
+// rebasedOnly reports whether the pushes since my last action left me
+// nothing to look at: the diff version I last saw and the newest one have
+// the same patch ID, as computed by GitLab. Any doubt is false: a push
+// landed while fetching, my last action is older than every version
+// fetched, a patch ID is missing, notes are missing, the merge request
+// was retargeted, or GitLab took my approval away.
+//
+// The caller has checked that I am not among the approvers.
+func rebasedOnly(s *mr.Snapshot, me string, myLast time.Time) bool {
+	if s.Unsettled || s.DiscussionsTruncated || len(s.Versions) == 0 {
 		return false
 	}
 	// Versions are newest first: the first one not after my last action
-	// is what I saw.
-	for _, v := range s.Versions {
-		if !v.CreatedAt.After(myLast) {
-			return same(v, s.Versions[0])
+	// is the one I saw.
+	seen := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(myLast) })
+	newest := s.Versions[0]
+	if seen < 0 || newest.PatchIDSHA == "" || s.Versions[seen].PatchIDSHA != newest.PatchIDSHA {
+		return false
+	}
+	var approved, unapproved time.Time
+	for _, d := range s.Discussions {
+		for _, n := range d.Notes {
+			if !n.System {
+				continue
+			}
+			// The same changes, but they now go to another branch.
+			if n.CreatedAt.After(myLast) && (strings.HasPrefix(n.Body, "changed target branch") || strings.Contains(n.Body, "This merge request now targets")) {
+				return false
+			}
+			if n.Author.Username != me {
+				continue
+			}
+			if strings.HasPrefix(n.Body, "approved this merge request") {
+				approved = later(approved, n.CreatedAt)
+			}
+			if strings.HasPrefix(n.Body, "unapproved this merge request") {
+				unapproved = later(unapproved, n.CreatedAt)
+			}
 		}
 	}
-	return false
+	// I approved and did not take it back, yet I am not among the
+	// approvers: GitLab removed my approval with a push, and waits for me.
+	return approved.IsZero() || unapproved.After(approved)
+}
+
+// changedAt dates new_commits: when the changes I have not seen arrived,
+// not the newest push. The rebases that followed, which kept the patch
+// ID, must not move it, or inbox wait would fire again for each of them.
+func changedAt(s *mr.Snapshot, a activity) time.Time {
+	at := a.pushedAt
+	if s.Unsettled || len(s.Versions) == 0 || s.Versions[0].PatchIDSHA == "" {
+		return at
+	}
+	for _, v := range s.Versions[1:] {
+		if v.PatchIDSHA != s.Versions[0].PatchIDSHA || !v.CreatedAt.After(a.myLast) {
+			break
+		}
+		at = v.CreatedAt
+	}
+	return at
 }
 
 func authoredItem(s *mr.Snapshot, p mr.People) Item {

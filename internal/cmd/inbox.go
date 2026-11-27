@@ -112,9 +112,9 @@ or the default one), newest first:
   review    open merge requests where I am a reviewer, with the reasons:
             review_requested (never reviewed, or review requested again
             after my last action), new_commits (pushed after my last
-            comment, and not approved by me; a push that only rebased
-            the same changes does not count), new_replies (in a thread
-            I took part in, or mentioning me, after my last comment)
+            comment, and not approved by me; a rebase that keeps GitLab's
+            patch ID of the changes does not count), new_replies (in a
+            thread I took part in, or mentioning me, after my last comment)
   authored  my open merge requests: new_comments (after my last comment
             or push), pipeline_failed, ready_to_merge
   todo      my pending to-do items (mentions, directly addressed, approval

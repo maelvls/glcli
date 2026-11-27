@@ -113,6 +113,9 @@ type Version struct {
 	StartCommitSHA string    `json:"start_commit_sha"`
 	CreatedAt      time.Time `json:"created_at"`
 	State          string    `json:"state"`
+	// PatchIDSHA is GitLab's git patch-id of base..head: a rebase that
+	// keeps the changes keeps it. It can be empty (not computed).
+	PatchIDSHA string `json:"patch_id_sha"`
 }
 
 // VersionDiff is one file of a version.
