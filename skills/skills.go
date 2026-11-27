@@ -26,11 +26,57 @@ type Skill struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Files       []string `json:"files"`
+	// Installed, Symlink and Error are only set by Compare. Installed is
+	// absent, identical, differs or unreadable.
+	Installed string `json:"installed,omitempty"`
+	// Symlink is where the installed skill points to when it is a symlink.
+	Symlink string `json:"symlink,omitempty"`
+	// Error says why the installed skill is unreadable.
+	Error string `json:"error,omitempty"`
 }
 
 // List returns the embedded skills, sorted by name.
 func List() ([]Skill, error) {
 	return list(FS)
+}
+
+// Compare returns the embedded skills and, for each, how the skill of the
+// same name in the skills directory dir compares with it (see sameFiles).
+// It only reads: this is the check that an installed skill is this
+// binary's, so it must be safe to run anywhere, and dir is not created.
+func Compare(dir string) ([]Skill, error) {
+	return compare(FS, dir)
+}
+
+func compare(fsys fs.FS, dir string) ([]Skill, error) {
+	all, err := list(fsys)
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		s := &all[i]
+		dest := filepath.Join(dir, s.Name)
+		info, err := os.Lstat(dest)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			s.Installed = "absent"
+			continue
+		case err != nil:
+			s.Installed, s.Error = "unreadable", err.Error()
+			continue
+		case info.Mode()&fs.ModeSymlink != 0:
+			s.Symlink, _ = os.Readlink(dest)
+		}
+		switch same, err := sameFiles(fsys, s.Name, dest); {
+		case err != nil:
+			s.Installed, s.Error = "unreadable", err.Error()
+		case same:
+			s.Installed = "identical"
+		default:
+			s.Installed = "differs"
+		}
+	}
+	return all, nil
 }
 
 func list(fsys fs.FS) ([]Skill, error) {
@@ -173,6 +219,12 @@ func sameFiles(fsys fs.FS, name, dest string) (bool, error) {
 	want, err := readFiles(embedded)
 	if err != nil {
 		return false, err
+	}
+	// Checked first because os.DirFS calls dest "." in its errors.
+	if info, err := os.Stat(dest); err != nil {
+		return false, err
+	} else if !info.IsDir() {
+		return false, fmt.Errorf("%s is not a directory", dest)
 	}
 	// os.DirFS follows dest when it is a symlink.
 	got, err := readFiles(os.DirFS(dest))
