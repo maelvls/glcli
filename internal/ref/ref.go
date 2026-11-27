@@ -168,11 +168,30 @@ func GitRemote() (host, project string, err error) {
 			return "", "", fmt.Errorf("git remote get-url %s: %w", first, err)
 		}
 	}
-	h, p, ok := ParseRemote(strings.TrimSpace(string(out)))
+	raw := strings.TrimSpace(string(out))
+	h, p, ok := ParseRemote(raw)
 	if !ok {
-		return "", "", fmt.Errorf("cannot read the remote URL %q", strings.TrimSpace(string(out)))
+		return "", "", remoteError(raw)
 	}
 	return h, p, nil
+}
+
+// remoteError is the error for a remote URL that ParseRemote cannot read.
+// A remote can hold a token (https://oauth2:glpat-…@host/…), so what
+// precedes its last "@" is never shown. It is cut by hand: url.Parse fails
+// on these URLs.
+func remoteError(raw string) error {
+	at := strings.LastIndex(raw, "@")
+	if at < 0 {
+		return fmt.Errorf("cannot read the remote URL %q", raw)
+	}
+	scheme := ""
+	for _, s := range []string{"https://", "http://", "ssh://", "git://"} {
+		if strings.HasPrefix(raw, s) {
+			scheme = s
+		}
+	}
+	return fmt.Errorf("cannot read the remote URL %q (what precedes the @ is left out)", scheme+raw[at+1:])
 }
 
 // ParseRemote reads a git remote URL: git@host:group/project.git,
@@ -196,6 +215,10 @@ func ParseRemote(s string) (host, project string, ok bool) {
 		return "", "", false
 	}
 	host = s[at+1 : colon]
+	// "a@glpat-…@host:group/project" would make the token part of the host.
+	if strings.Contains(host, "@") {
+		return "", "", false
+	}
 	project = strings.TrimSuffix(strings.Trim(s[colon+1:], "/"), ".git")
 	return host, project, host != "" && project != ""
 }
