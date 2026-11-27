@@ -28,6 +28,8 @@ type View struct {
 	MergedBy     string        `json:"merged_by,omitempty"`
 	MergedAt     *time.Time    `json:"merged_at,omitempty"`
 	MergeSHA     string        `json:"merge_sha,omitempty"`
+	ClosedBy     string        `json:"closed_by,omitempty"`
+	ClosedAt     *time.Time    `json:"closed_at,omitempty"`
 	Approvals    ApprovalsView `json:"approvals"`
 	Pipeline     *PipelineView `json:"pipeline,omitempty"`
 	Threads      ThreadsView   `json:"threads"`
@@ -99,10 +101,18 @@ func NewView(s *Snapshot, p People, o ViewOptions) View {
 		MergedAt:     m.MergedAt,
 		UpdatedAt:    m.UpdatedAt,
 	}
-	if m.State == "merged" {
+	switch m.State {
+	case "merged":
 		v.MergeSHA = firstNonEmpty(m.SquashCommitSHA, m.MergeCommitSHA, m.SHA)
-		if m.MergedBy != nil {
-			v.MergedBy = m.MergedBy.Username
+		if u := m.Merger(); u != nil {
+			v.MergedBy = u.Username
+		}
+	case "closed":
+		// Only while closed: a reopened merge request may still carry
+		// who closed it last.
+		v.ClosedAt = m.ClosedAt
+		if m.ClosedBy != nil {
+			v.ClosedBy = m.ClosedBy.Username
 		}
 	}
 	for _, r := range m.Reviewers {

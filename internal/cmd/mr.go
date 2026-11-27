@@ -139,24 +139,38 @@ Events are computed against --cursor (from an earlier mr get or mr wait),
 so nothing that happened in between is missed; without it, against the
 state when the command starts. Kinds of events, selected with --on:
 
-  push      new commits whose changes differ ("rebase_only": false)
-  rebase    a push that keeps the same changes (rebase, reword)
+  push      new commits whose changes differ ("rebase_only": false), or
+            that could not be compared ("rebase_only" absent)
+  rebase    a push that keeps the same changes (rebase, reword:
+            "rebase_only": true)
   comment   a new comment by someone else (bots left out)
   thread    a thread resolved or reopened
   approval  an approval given or withdrawn
   state     merged, closed or reopened
   pipeline  the head pipeline reaching a final status
 
+A push is a rebase when GitLab's patch ID of the merge request (git
+patch-id of its changes) is the same before and after. This needs
+GitLab 18.2 or newer, whose patch IDs see whitespace, and a cursor that
+carries one. One change still passes for a rebase: a push that rebases
+and also moves a change to another place of its file, where the lines
+around it are the same. Without patch IDs (older GitLab, a cursor
+printed by an older glcli) glcli compares the two diffs itself, and they
+must be identical: a rebase onto a target branch that added or removed
+lines anywhere above a change in the same file, or changed the lines
+next to it, then counts as a push.
+
 --on defaults to push,comment,thread,approval,state. What I did myself
-(my push, my approval, my resolve) does not end the wait unless
---include-mine. Every event since the cursor is printed, including those
-that did not end the wait, each with its "kind".
+(my push, my approval, my resolve, my merge, my close) does not end the
+wait unless --include-mine. Every event since the cursor is printed,
+including those that did not end the wait, each with its "kind".
 
 It polls every --interval (1m), keeps trying while GitLab cannot be
 reached (closed lid, VPN down), and has no time limit unless --timeout.
 Once the merge request is merged or closed, it returns whatever --on
-says (nothing more will happen to it), with a hint when nothing in --on
-happened. A cursor from another merge request is refused.
+says and whoever did it (nothing more will happen to it), with a hint
+and no triggered_by when no event ended the wait. A cursor from another
+merge request is refused.
 
 Prints {events, mr, triggered_by}. mr.cursor is the cursor to wait again.
 When --timeout runs out: events [], timed_out true, and mr.cursor is the
@@ -213,6 +227,9 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 				if s.Unsettled {
 					return false, nil // a push is landing: look again next time
 				}
+				if d.AwaitsPatchID(ctx, prev, s) {
+					return false, nil // GitLab has not computed the patch ID of the push yet
+				}
 				last = s
 				events, err := d.Events(ctx, prev, s)
 				if err != nil {
@@ -253,7 +270,7 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 	}
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Compute events against this cursor (from mr get or mr wait) instead of the state at start")
 	cmd.Flags().StringSliceVar(&on, "on", mr.DefaultTriggers, "Kinds of event that end the wait: "+strings.Join(mr.Triggers, ", "))
-	cmd.Flags().BoolVar(&includeMine, "include-mine", false, "Let my own pushes, approvals, resolves and merges end the wait too")
+	cmd.Flags().BoolVar(&includeMine, "include-mine", false, "Let my own pushes, approvals, resolves, merges and closes end the wait too")
 	cmd.Flags().IntVar(&maxBody, "max-body-chars", 4000, "Cut comment bodies after this many characters (0: no limit)")
 	cmd.Flags().StringSliceVar(&ignore, "ignore-author", nil, "Usernames whose comments do not count (bots are already left out); repeatable")
 	addWaitFlags(cmd, &w, defaultMRInterval)

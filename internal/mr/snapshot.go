@@ -22,7 +22,7 @@ type Snapshot struct {
 	Discussions []gitlab.Discussion
 	// DiscussionsTruncated is true when there were more than maxPages pages.
 	DiscussionsTruncated bool
-	// Versions are the diff versions, newest first (first page only).
+	// Versions are the diff versions, newest first (the newest 100 only).
 	Versions []gitlab.Version
 	// PipelineIsHead is true when MR.HeadPipeline ran on the head commit:
 	// on MR.SHA itself, or on a merged-results or merge-train commit
@@ -124,7 +124,7 @@ func fetchOnce(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, erro
 		return err
 	})
 	run(3, func() error {
-		return c.Get(ctx, base+"/versions", url.Values{"per_page": {"20"}}, &s.Versions)
+		return c.Get(ctx, base+"/versions", url.Values{"per_page": {"100"}}, &s.Versions)
 	})
 	wg.Wait()
 	for _, err := range errs {

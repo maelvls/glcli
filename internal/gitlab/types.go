@@ -61,8 +61,20 @@ type MergeRequest struct {
 	UpdatedAt             time.Time             `json:"updated_at"`
 	MergedAt              *time.Time            `json:"merged_at"`
 	ClosedAt              *time.Time            `json:"closed_at"`
+	MergeUser             *User                 `json:"merge_user"`
 	MergedBy              *User                 `json:"merged_by"`
+	ClosedBy              *User                 `json:"closed_by"`
 	BlockingDiscussionsOK bool                  `json:"blocking_discussions_resolved"`
+}
+
+// Merger is who merged m: merge_user, or merged_by (deprecated since GitLab
+// 14.7) when the instance does not send merge_user. On a merge request that
+// is still open, it is who set auto-merge. Nil when GitLab names nobody.
+func (m *MergeRequest) Merger() *User {
+	if m.MergeUser != nil {
+		return m.MergeUser
+	}
+	return m.MergedBy
 }
 
 // Approvals is GET /projects/:id/merge_requests/:iid/approvals.
@@ -113,18 +125,29 @@ type Version struct {
 	StartCommitSHA string    `json:"start_commit_sha"`
 	CreatedAt      time.Time `json:"created_at"`
 	State          string    `json:"state"`
+	// PatchIDSHA is GitLab's git patch-id of base..head: a rebase that
+	// keeps the changes keeps it. It can be empty (not computed).
+	PatchIDSHA string `json:"patch_id_sha"`
 }
 
-// VersionDiff is one file of a version.
+// VersionDiff is one file of a version, or of a comparison.
 type VersionDiff struct {
-	OldPath     string `json:"old_path"`
-	NewPath     string `json:"new_path"`
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+	// AMode and BMode are the modes of the file before and after, in
+	// octal: "100644", "100755", and "0" on the side where it is absent.
+	AMode       string `json:"a_mode"`
+	BMode       string `json:"b_mode"`
 	Diff        string `json:"diff"`
 	NewFile     bool   `json:"new_file"`
 	RenamedFile bool   `json:"renamed_file"`
 	DeletedFile bool   `json:"deleted_file"`
-	TooLarge    bool   `json:"too_large"`
-	Collapsed   bool   `json:"collapsed"`
+	// TooLarge and Collapsed say that GitLab left the diff out (it is
+	// then empty). The compare API only sends them from GitLab 18.4 on:
+	// nil means GitLab did not say, not that the diff is whole. Before
+	// 18.4, a diff left out is empty and nothing tells.
+	TooLarge  *bool `json:"too_large"`
+	Collapsed *bool `json:"collapsed"`
 }
 
 // VersionDetail is GET .../versions/:id.
