@@ -9,7 +9,7 @@ Use `glcli` from `$PATH`. If it is missing, tell the user: `go install github.co
 
 `glcli --help` and each subcommand's `--help` are authoritative: they document every flag and the JSON each command prints. If a capability named here is absent from the installed help, report version skew instead of guessing.
 
-glcli reads glab's hosts and tokens (`~/.config/glab-cli/config.yml`): if a token is missing or rejected, tell the user to run `glab auth login --hostname <host>`. `glcli auth status` lists the hosts without calling GitLab.
+glcli reads glab's hosts and tokens (`~/.config/glab-cli/config.yml`), whether glab logged in with a token or with OAuth: if a token is missing or rejected, glcli's error on stderr says what the user must run; tell them that. It is `glab auth status --hostname <host>` for an expired OAuth token (glab renews it, glcli never does; then run the same glcli command again), `glab auth login --hostname <host> --insecure-storage` or `GLCLI_TOKEN` for a token that glab keeps in the keyring (glcli does not read it), and `glab auth login --hostname <host>` otherwise, with `--insecure-storage` if glab is 1.111.0 or later (without it, such a glab puts the token in the keyring and glcli fails again). `glcli auth status` lists the hosts without calling GitLab.
 
 ## Safety
 
@@ -40,7 +40,7 @@ glcli v1 only reads. For writes (comments, replies, resolving threads, approving
 ## Non-obvious behaviour
 
 - Output is one line of JSON (indented only on a terminal); empty fields are left out, but top-level lists (`items`, `events`, `discussions`, `failed_jobs`) are always present.
-- Comments by bots (`project_123_bot_…`, `*-bot`) and system notes never count as human comments; `--ignore-author` adds usernames.
+- Comments by bots (`project_123_bot_…`, service accounts `service_account_…`, `*-bot`, GitLab's own such as `GitLab-Security-Bot`) and system notes do not count as human comments; `--ignore-author` leaves out more usernames, and `--include-author` brings a bot back (a reviewer that runs under a service account). GitLab Duo reviews count: `--ignore-author GitLabDuo` leaves them out.
 - Commands are cut after 30 s (exit 124; `GLCLI_COMMAND_TIMEOUT_MS`), except the wait commands. The wait commands keep trying while GitLab cannot be reached (closed lid, VPN down) and stop on any other error. Exit 130 when interrupted.
 - `--host` picks another instance (such as `code.pan.run`) for `inbox` and short references; a URL carries its host.
 - `GLCLI_DEBUG=1` traces each API call with its duration on stderr.

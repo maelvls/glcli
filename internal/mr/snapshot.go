@@ -139,12 +139,19 @@ func fetchOnce(ctx context.Context, c *gitlab.Client, r ref.MR) (*Snapshot, erro
 type People struct {
 	Me     string
 	Ignore map[string]bool
+	// Include are usernames that count although they look like bots, such
+	// as a reviewer that runs under a service account.
+	Include map[string]bool
 }
 
-// Human reports whether u is a person other than me, not a bot and not
+// Human reports whether u is a person other than me, not ignored, and
+// not a bot unless included. An author both included and ignored is
 // ignored.
 func (p People) Human(u gitlab.User) bool {
-	return u.Username != p.Me && !gitlab.IsBot(u.Username) && !p.Ignore[u.Username]
+	if u.Username == p.Me || p.Ignore[u.Username] {
+		return false
+	}
+	return p.Include[u.Username] || !gitlab.IsBot(u.Username)
 }
 
 // ApprovedBy lists who approved.

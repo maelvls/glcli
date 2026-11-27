@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/maelvls/glcli/internal/cli"
+	"github.com/maelvls/glcli/internal/config"
 	"github.com/maelvls/glcli/internal/gitlab"
 )
 
@@ -68,7 +69,7 @@ func run(rt *cli.Runtime, args []string) int {
 	}
 	fmt.Fprintf(rt.Stderr, "glcli: %v\n", err)
 	if gitlab.IsStatus(err, 401) {
-		fmt.Fprintln(rt.Stderr, "glcli: the token was rejected: run `glab auth login --hostname <host>` (glcli reads glab's config), or `glcli auth status`")
+		fmt.Fprintln(rt.Stderr, "glcli: "+rejectedTokenHint(err))
 	}
 	return 1
 }
@@ -91,6 +92,63 @@ func commandTimeout() time.Duration {
 		}
 	}
 	return defaultCommandTimeout
+}
+
+// rejectedTokenHint says what to do after an HTTP 401: log in again with
+// glab on the host that answered (as glab calls it, when the error
+// tells), or change the environment variable when the token came from
+// one, since logging in would change nothing then. A 401 from another
+// host, after a redirect, says nothing about the token: it was not sent.
+//
+// The token of an OAuth login of glab expires (two hours after glab got
+// it, unless the instance says otherwise), and glab renews it, not glcli:
+// logging in again is not needed then. `glab auth status` is named
+// because it asks GitLab who the token belongs to, through the client of
+// glab that renews an expired token before it sends it. When the hint is
+// printed, glab's config has already been read again (see cli.Runtime),
+// and had no other token; when it could not be read, the hint says so, with
+// the reason, which never repeats what the file holds (see config.Parse).
+func rejectedTokenHint(err error) string {
+	host, source := "<host>", ""
+	var apiErr *gitlab.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.RedirectedTo != "" {
+			return "the request was redirected to " + apiErr.RedirectedTo + ", where the token is not sent: this 401 does not say that the token was rejected"
+		}
+		if apiErr.Host != "" {
+			host = apiErr.Host
+		}
+		source = apiErr.TokenSource
+	}
+	if strings.HasPrefix(source, "$") {
+		return "the token from " + source + " was rejected by " + host + ": unset it (glcli then reads glab's config) or replace it; `glcli auth status` shows where each token comes from"
+	}
+	// glab's config has another token by now, but for another API address
+	// or another user than this command started with: it was not used.
+	if apiErr != nil && errors.Is(apiErr.Renewal, gitlab.ErrLoginChanged) {
+		return "the token was rejected, and " + apiErr.Renewal.Error() + ". Run the same glcli command again: it will use the new login from its start"
+	}
+	// Whether glab's config has a newer token is not known when it could
+	// not be read again.
+	unread := ""
+	if apiErr != nil && apiErr.Renewal != nil {
+		unread = ", and glab's config could not be read again to look for a newer one (" + apiErr.Renewal.Error() + ")"
+	}
+	if apiErr != nil && apiErr.OAuth {
+		what, newer := "the OAuth token of "+host+" was rejected (glab's config does not say when it expires)", ""
+		switch expiry := apiErr.TokenExpiry; {
+		case expiry.IsZero():
+		case expiry.Before(time.Now()):
+			what, newer = "the OAuth token of "+host+" expired at "+expiry.Format(time.RFC3339), ", and glab's config has no newer one"
+		default:
+			what = "the OAuth token of " + host + " was rejected, although glab's config says that it expires at " + expiry.Format(time.RFC3339)
+		}
+		if unread != "" {
+			newer = unread
+		}
+		return what + newer + ". glcli never renews it; glab does, when it calls GitLab: run `glab auth status --hostname " + host + "`, then the same glcli command again (`mr wait` with the same --cursor misses nothing). If glab cannot renew it, run " + config.LoginAdvice(host)
+	}
+	return "the token was rejected" + unread + ": run " + config.LoginAdvice(host) + ", or `glcli auth status`"
 }
 
 type usageError struct{ error }
@@ -121,9 +179,18 @@ is waiting on happens, and print it:
 A merge request is its URL, group/project!123, or !123 inside a git
 checkout of the project.
 
-Environment: GLCLI_HOST (default host), GLCLI_TOKEN or GITLAB_TOKEN (token
-for the default host), GLCLI_DEBUG=1 (trace each API call on stderr),
-GLCLI_COMMAND_TIMEOUT_MS (30000; the wait commands have no timeout).`,
+Environment: GLCLI_HOST (default host), GLCLI_TOKEN or GITLAB_TOKEN (a
+personal, project or group access token for the default host, used
+instead of glab's), GLCLI_DEBUG=1 (trace each API call on stderr),
+GLCLI_COMMAND_TIMEOUT_MS (30000; the wait commands have no timeout).
+
+Tokens: glcli reads the token glab wrote to its config file, whether glab
+logged in with a token or with OAuth. It does not read the keyring of the
+operating system, where glab 1.111.0 and later keep tokens unless
+"glab auth login" is given --insecure-storage: use that flag, or
+GLCLI_TOKEN. glcli never renews the token of an OAuth login, which expires
+after two hours: glab does when it calls GitLab ("glab auth status"), and
+glcli then reads the new one, even in the middle of a wait command.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

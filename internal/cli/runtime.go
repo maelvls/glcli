@@ -34,12 +34,19 @@ type Runtime struct {
 	// NewClient can be replaced in tests.
 	NewClient func(h config.Host) *gitlab.Client
 
-	mu       sync.Mutex
-	cfg      *config.Config
-	clients  map[string]*gitlab.Client
-	me       map[string]string
-	warnings []string
-	hints    []string
+	mu        sync.Mutex
+	cfg       *config.Config
+	reread    *config.Config // the config as last read again after a rejected token
+	rereadErr error          // why it could not be read again, the last time
+	reloads   int            // how many times it was read again
+	clients   map[string]*gitlab.Client
+	me        map[string]string
+	warnings  []string
+	hints     []string
+
+	// reloadMu makes the goroutines whose token was rejected read glab's
+	// config again one at a time. It is taken before mu, never after.
+	reloadMu sync.Mutex
 }
 
 // New returns a runtime writing to stdout and stderr.
@@ -55,7 +62,11 @@ func New(stdout, stderr io.Writer) *Runtime {
 	}
 }
 
-// Config loads glab's configuration once.
+// Config loads glab's configuration once: the hosts, the default host and
+// the users of a command are the ones it started with, however long it
+// runs. (The file is read again when GitLab rejects a token that came from
+// it, to look for the token that replaced it and for nothing else: see
+// renewer.)
 func (r *Runtime) Config() (*config.Config, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -106,11 +117,109 @@ func (r *Runtime) Client(host string) (*gitlab.Client, error) {
 	if r.Debug {
 		c.Trace = r.Tracef
 	}
+	// A token from the environment does not change while glcli runs: only
+	// the ones of glab's config are looked for again.
+	if !strings.HasPrefix(h.TokenSource, "$") {
+		c.Renewer = renewer{r}
+	}
 	if r.clients == nil {
 		r.clients = map[string]*gitlab.Client{}
 	}
 	r.clients[host] = c
 	return c, nil
+}
+
+// renewer is the gitlab.Renewer of the clients whose token came from glab's
+// config. glcli never renews a token itself and never writes to glab's
+// config: when GitLab rejects a token, it reads the config again, in case
+// glab renewed the token meanwhile (it does so for an OAuth login whenever
+// it calls GitLab with a token that has expired or is about to), or the
+// user logged in again.
+type renewer struct{ r *Runtime }
+
+func (n renewer) Generation() int {
+	n.r.mu.Lock()
+	defer n.r.mu.Unlock()
+	return n.r.reloads
+}
+
+// Renew returns the host with the token that glab's config, read again,
+// has for it, when that is another token than the rejected one.
+//
+// What is read again is kept apart from the config the command started
+// with, and only its tokens are looked at: a default host that changed in
+// the file meanwhile does not send the rest of an "inbox wait" to another
+// instance.
+//
+// The requests of a command go in bursts (mr.Fetch and inbox.Collect send
+// several at once), and a rejected token is rejected for each: the config
+// is read once for a burst, not once per request. The first goroutine to
+// come reads it; the ones that waited meanwhile find either another token
+// than theirs in what was read, or, by the generation, that the config was
+// read after their request left, and so do not read it again. A request
+// that leaves after that and is rejected too makes the config be read
+// again: a command that waits looks again at each poll.
+func (n renewer) Renew(rejected config.Host, generation int) (config.Host, bool, error) {
+	r := n.r
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+	r.mu.Lock()
+	reread, failed, reloads := r.reread, r.rereadErr, r.reloads
+	r.mu.Unlock()
+	if h, ok, _ := otherToken(reread, rejected); ok {
+		return h, true, nil
+	}
+	if reloads != generation {
+		// The answer of the goroutine that read the config for this burst.
+		if failed != nil {
+			return rejected, false, failed
+		}
+		return otherToken(reread, rejected)
+	}
+	fresh, err := r.LoadConfig()
+	r.mu.Lock()
+	r.reloads++
+	r.rereadErr = err
+	if err == nil {
+		r.reread = fresh
+	}
+	r.mu.Unlock()
+	if err != nil {
+		r.Tracef("%s: the token was rejected, and glab's config cannot be read again: %v", rejected.Name, err)
+		return rejected, false, err
+	}
+	r.Tracef("%s: the token was rejected: glab's config was read again", rejected.Name)
+	return otherToken(fresh, rejected)
+}
+
+// otherToken returns the host of cfg that rejected came from, when the file
+// has another token for it than the rejected one. The tokens of the
+// environment are not looked at: cfg may name another default host than
+// the config the command started with, and they are for the default host.
+//
+// A token is only taken for what the rejected one was for. The command
+// goes on with the API address it started with: a token that the file now
+// gives for another API address would be sent to a host it was not written
+// for. And it goes on with the username it started with (see Me): a token
+// of another user would have "inbox wait" look for the merge requests of
+// the first user in the name of the second. In both cases the error has
+// gitlab.ErrLoginChanged, and the command ends with its 401: run again, it
+// reads the new login as a whole.
+func otherToken(cfg *config.Config, rejected config.Host) (config.Host, bool, error) {
+	if cfg == nil {
+		return rejected, false, nil
+	}
+	h, ok := cfg.Hosts[rejected.Name]
+	if !ok || h.Token == "" || h.Token == rejected.Token {
+		return rejected, false, nil
+	}
+	if h.BaseURL() != rejected.BaseURL() {
+		return rejected, false, fmt.Errorf("%w: the API of %s is now at %s there", gitlab.ErrLoginChanged, rejected.Name, h.BaseURL())
+	}
+	if h.User != "" && rejected.User != "" && h.User != rejected.User {
+		return rejected, false, fmt.Errorf("%w: %s is now logged in as %s there", gitlab.ErrLoginChanged, rejected.Name, h.User)
+	}
+	return h, true, nil
 }
 
 // Me returns the username of the token's owner on c's host: the one glab
