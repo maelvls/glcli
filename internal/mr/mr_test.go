@@ -31,7 +31,7 @@ func TestPatchIDSeesLineNumbersAndContext(t *testing.T) {
 	if a == c {
 		t.Error("different changes must give a different patch ID")
 	}
-	if _, known := PatchID([]gitlab.VersionDiff{{NewPath: "big", TooLarge: true}}); known {
+	if _, known := PatchID([]gitlab.VersionDiff{{NewPath: "big", TooLarge: flag(true)}}); known {
 		t.Error("a too-large diff makes the patch ID unknown")
 	}
 }

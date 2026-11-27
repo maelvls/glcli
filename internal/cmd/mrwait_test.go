@@ -109,27 +109,39 @@ func TestMRWaitRebaseThenChange(t *testing.T) {
 // absent and the push ends the wait like a change.
 func TestMRWaitRebaseOnlyUnknownEndsTheWait(t *testing.T) {
 	diff := "@@ -1 +1 @@\n-old\n+new\n"
+	// Before GitLab 18.4, a diff left out for its size is an empty diff
+	// and nothing says so: a big file renamed and edited, or made
+	// executable and edited, reads the same after any further edit.
+	const (
+		renamedBig = `{"commits": [], "diffs": [{"old_path": "big.go", "new_path": "huge.go", "a_mode": "100644", "b_mode": "100644", "renamed_file": true, "diff": ""}]}`
+		chmodBig   = `{"commits": [], "diffs": [{"old_path": "big.go", "new_path": "big.go", "a_mode": "100644", "b_mode": "100755", "diff": ""}]}`
+	)
 	tests := []struct {
 		name string
-		// newer is what GitLab answers when asked to compare base2..head2.
-		newer string
+		// older and newer are what GitLab answers when asked to compare
+		// base1..head1 and base2..head2: the diff of one line when empty.
+		older, newer string
 		// want is rebase_only: "true", "false" or "unknown".
 		want string
 	}{
-		{"an answer without diffs", `{"commits": []}`, "unknown"},
-		{"a diff too large", `{"commits": [], "diffs": [{"old_path": "a.go", "new_path": "a.go", "diff": "", "too_large": true}]}`, "unknown"},
-		{"a binary file", mrWaitComparison("Binary files a/a.go and b/a.go differ\n"), "unknown"},
-		{"the commits are gone", "", "unknown"},
+		{"an answer without diffs", "", `{"commits": []}`, "unknown"},
+		{"a binary file", "", mrWaitComparison("Binary files a/a.go and b/a.go differ\n"), "unknown"},
+		{"the commits are gone", "", "gone", "unknown"},
+		{"a renamed file whose diff was left out", renamedBig, renamedBig, "unknown"},
+		{"a file made executable whose diff was left out", chmodBig, chmodBig, "unknown"},
 		// The same patch ID before 18.2 may hide whitespace: the diffs decide.
-		{"another diff", mrWaitComparison("@@ -1 +1 @@\n-old\n+    new\n"), "false"},
-		{"the same diff", mrWaitComparison(diff), "true"},
+		{"another diff", "", mrWaitComparison("@@ -1 +1 @@\n-old\n+    new\n"), "false"},
+		{"the same diff", "", mrWaitComparison(diff), "true"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Before 18.2, patch IDs are not trusted: the compare API is asked.
 			f := newMRWaitFake(t, "17.11.4")
 			f.compare["base1..head1"] = mrWaitComparison(diff)
-			if tt.newer != "" {
+			if tt.older != "" {
+				f.compare["base1..head1"] = tt.older
+			}
+			if tt.newer != "gone" {
 				f.compare["base2..head2"] = tt.newer
 			}
 			opened := mrWaitOpened()

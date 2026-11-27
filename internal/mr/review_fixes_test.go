@@ -37,8 +37,9 @@ func TestPatchIDSeesRealChanges(t *testing.T) {
 	if _, known := id(t, gitlab.VersionDiff{OldPath: "logo.png", NewPath: "logo.png", Diff: ""}); known {
 		t.Error("a change without lines must be unknown")
 	}
-	// A pure rename has no lines but is known.
-	if _, known := id(t, gitlab.VersionDiff{OldPath: "a", NewPath: "b", RenamedFile: true}); !known {
+	// A pure rename has no lines but is known, when GitLab says that it
+	// did not leave the diff out (18.4 or newer).
+	if _, known := id(t, gitlab.VersionDiff{OldPath: "a", NewPath: "b", RenamedFile: true, TooLarge: flag(false), Collapsed: flag(false)}); !known {
 		t.Error("a pure rename must be known")
 	}
 }

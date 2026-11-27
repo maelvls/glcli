@@ -8,9 +8,19 @@ import (
 	"github.com/maelvls/glcli/internal/gitlab"
 )
 
-// file is a.go changed by diff, as the compare API gives it.
+// file is a.go changed by diff, as the compare API gives it before
+// GitLab 18.4: without too_large and collapsed.
 func file(diff string) gitlab.VersionDiff {
 	return gitlab.VersionDiff{OldPath: "a.go", NewPath: "a.go", AMode: "100644", BMode: "100644", Diff: diff}
+}
+
+func flag(b bool) *bool { return &b }
+
+// whole is d as GitLab 18.4 or newer gives it when the diff was not left
+// out: too_large and collapsed are there, and false.
+func whole(d gitlab.VersionDiff) gitlab.VersionDiff {
+	d.TooLarge, d.Collapsed = flag(false), flag(false)
+	return d
 }
 
 // Pairs of different changes that glcli's own hash used to call the same:
@@ -80,18 +90,18 @@ func TestPatchIDTellsDifferentChangesApart(t *testing.T) {
 		},
 		{
 			name: "a rename, to one name or to another",
-			a:    gitlab.VersionDiff{OldPath: "a.go", NewPath: "b.go", AMode: "100644", BMode: "100644", RenamedFile: true},
-			b:    gitlab.VersionDiff{OldPath: "a.go", NewPath: "c.go", AMode: "100644", BMode: "100644", RenamedFile: true},
+			a:    whole(gitlab.VersionDiff{OldPath: "a.go", NewPath: "b.go", AMode: "100644", BMode: "100644", RenamedFile: true}),
+			b:    whole(gitlab.VersionDiff{OldPath: "a.go", NewPath: "c.go", AMode: "100644", BMode: "100644", RenamedFile: true}),
 		},
 		{
 			name: "a mode change, to one mode or to another",
-			a:    gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "100755"},
-			b:    gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "120000"},
+			a:    whole(gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "100755"}),
+			b:    whole(gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "120000"}),
 		},
 		{
 			name: "paths that spell the same when put end to end",
-			a:    gitlab.VersionDiff{OldPath: "ab", NewPath: "c", RenamedFile: true},
-			b:    gitlab.VersionDiff{OldPath: "a", NewPath: "bc", RenamedFile: true},
+			a:    whole(gitlab.VersionDiff{OldPath: "ab", NewPath: "c", RenamedFile: true}),
+			b:    whole(gitlab.VersionDiff{OldPath: "a", NewPath: "bc", RenamedFile: true}),
 		},
 	}
 	for _, tt := range tests {
@@ -129,14 +139,29 @@ func TestPatchIDUnknown(t *testing.T) {
 		{"a file with no diff and no modes", gitlab.VersionDiff{OldPath: "a", NewPath: "a"}, false},
 		{"a new file with no diff", gitlab.VersionDiff{OldPath: "a", NewPath: "a", AMode: "0", BMode: "100644", NewFile: true}, false},
 		{"a deleted file with no diff", gitlab.VersionDiff{OldPath: "a", NewPath: "a", AMode: "100644", BMode: "0", DeletedFile: true}, false},
-		{"a diff too large", gitlab.VersionDiff{OldPath: "a", NewPath: "a", TooLarge: true}, false},
-		{"a diff too large, of a renamed file", gitlab.VersionDiff{OldPath: "a", NewPath: "b", RenamedFile: true, TooLarge: true}, false},
-		{"a collapsed diff", gitlab.VersionDiff{OldPath: "a", NewPath: "a", Collapsed: true}, false},
-		{"a collapsed diff, of a file whose mode changes", gitlab.VersionDiff{OldPath: "a", NewPath: "a", AMode: "100644", BMode: "100755", Collapsed: true}, false},
 
-		{"a pure rename", gitlab.VersionDiff{OldPath: "a", NewPath: "b", AMode: "100644", BMode: "100644", RenamedFile: true}, true},
-		{"a mode change alone", gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "100755"}, true},
+		// GitLab 18.4 or newer says when it left a diff out.
+		{"a diff too large", gitlab.VersionDiff{OldPath: "a", NewPath: "a", TooLarge: flag(true), Collapsed: flag(false)}, false},
+		{"a diff too large, of a renamed file", gitlab.VersionDiff{OldPath: "a", NewPath: "b", RenamedFile: true, TooLarge: flag(true), Collapsed: flag(false)}, false},
+		{"a collapsed diff", gitlab.VersionDiff{OldPath: "a", NewPath: "a", TooLarge: flag(false), Collapsed: flag(true)}, false},
+		{"a collapsed diff, of a file whose mode changes", gitlab.VersionDiff{OldPath: "a", NewPath: "a", AMode: "100644", BMode: "100755", TooLarge: flag(false), Collapsed: flag(true)}, false},
+		{"too large, with lines all the same", gitlab.VersionDiff{OldPath: "a", NewPath: "a", Diff: "@@ -1 +1 @@\n-old\n+new\n", TooLarge: flag(true)}, false},
+		{"collapsed, with lines all the same", gitlab.VersionDiff{OldPath: "a", NewPath: "a", Diff: "@@ -1 +1 @@\n-old\n+new\n", Collapsed: flag(true)}, false},
+		{"a file with no diff, no rename and no mode change, not left out", whole(gitlab.VersionDiff{OldPath: "a", NewPath: "a", AMode: "100644", BMode: "100644"}), false},
+		{"a new file with no diff, not left out", whole(gitlab.VersionDiff{OldPath: "a", NewPath: "a", AMode: "0", BMode: "100644", NewFile: true}), false},
+
+		// Before 18.4 it does not: a diff left out is an empty diff, and
+		// so is the diff of a file only renamed or only made executable.
+		{"before 18.4: a renamed file with no diff", gitlab.VersionDiff{OldPath: "a", NewPath: "b", AMode: "100644", BMode: "100644", RenamedFile: true}, false},
+		{"before 18.4: a mode change with no diff", gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "100755"}, false},
+		{"only too_large is said: a renamed file with no diff", gitlab.VersionDiff{OldPath: "a", NewPath: "b", RenamedFile: true, TooLarge: flag(false)}, false},
+		{"only collapsed is said: a mode change with no diff", gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "100755", Collapsed: flag(false)}, false},
+
+		{"18.4: a pure rename", whole(gitlab.VersionDiff{OldPath: "a", NewPath: "b", AMode: "100644", BMode: "100644", RenamedFile: true}), true},
+		{"18.4: a mode change alone", whole(gitlab.VersionDiff{OldPath: "run", NewPath: "run", AMode: "100644", BMode: "100755"}), true},
+		{"18.4: a text change", whole(file("@@ -1 +1 @@\n-old\n+new\n")), true},
 		{"a text change", file("@@ -1 +1 @@\n-old\n+new\n"), true},
+		{"a renamed file with a text change", gitlab.VersionDiff{OldPath: "a", NewPath: "b", RenamedFile: true, Diff: "@@ -1 +1 @@\n-old\n+new\n"}, true},
 		{"a removed SQL comment", file("@@ -1 +0,0 @@\n-- a\n"), true},
 	}
 	for _, tt := range tests {
@@ -187,12 +212,54 @@ func TestRebaseOnlyFromTheCompareAPI(t *testing.T) {
 		return out
 	}
 	binary := map[string]any{"old_path": "logo.png", "new_path": "logo.png", "a_mode": "100644", "b_mode": "100644", "diff": "Binary files a/logo.png and b/logo.png differ\n"}
-	tests := []struct {
-		name       string
+	and := func(file map[string]any, more ...any) map[string]any {
+		out := map[string]any{}
+		for k, v := range file {
+			out[k] = v
+		}
+		for i := 0; i < len(more); i += 2 {
+			out[more[i].(string)] = more[i+1]
+		}
+		return out
+	}
+	// A file with an empty diff: only renamed, only made executable, or
+	// one whose diff GitLab left out. Before GitLab 18.4 nothing tells;
+	// from 18.4 on too_large and collapsed do.
+	empty := map[string]any{"old_path": "big.go", "new_path": "big.go", "a_mode": "100644", "b_mode": "100644", "diff": ""}
+	renamed := and(empty, "new_path", "huge.go", "renamed_file", true)
+	chmod := and(empty, "b_mode", "100755")
+	whole := func(file map[string]any) map[string]any { return and(file, "too_large", false, "collapsed", false) }
+	twice := func(file map[string]any) (string, string) { return compared(t, text, file), compared(t, text, file) }
+	type test struct {
+		name string
+		// release is the version of GitLab: 17.11.4 when empty. From 18.2
+		// on, the cursor has no patch ID, so that the diffs decide.
+		release    string
 		old, newer string
 		want       string
 		trigger    string
-	}{
+	}
+	both := func(name, release string, file map[string]any, want, trigger string) test {
+		old, newer := twice(file)
+		return test{name: name, release: release, old: old, newer: newer, want: want, trigger: trigger}
+	}
+	tests := []test{
+		// Before 18.4, a file renamed and edited, or made executable and
+		// edited, whose diff GitLab left out for its size: any further
+		// edit of it gives this same answer.
+		both("17.11: a renamed file with no diff, twice", "", renamed, "unknown", "push"),
+		both("17.11: a mode change with no diff, twice", "", chmod, "unknown", "push"),
+		both("18.3: a renamed file with no diff, twice", "18.3.2-ee", renamed, "unknown", "push"),
+		both("18.3: a mode change with no diff, twice", "18.3.2-ee", chmod, "unknown", "push"),
+		// From 18.4 on GitLab says whether it left the diff out.
+		both("18.5: a pure rename, twice", "18.5.1-ee", whole(renamed), "true", "rebase"),
+		both("18.5: a mode change alone, twice", "18.5.1-ee", whole(chmod), "true", "rebase"),
+		both("18.5: a renamed file whose diff is too large, twice", "18.5.1-ee", and(whole(renamed), "too_large", true), "unknown", "push"),
+		both("18.5: a mode change whose diff is collapsed, twice", "18.5.1-ee", and(whole(chmod), "collapsed", true), "unknown", "push"),
+		both("18.5: a diff too large, twice", "18.5.1-ee", and(whole(empty), "too_large", true), "unknown", "push"),
+		both("18.5: a collapsed diff, twice", "18.5.1-ee", and(whole(empty), "collapsed", true), "unknown", "push"),
+		both("18.5: the same diff, twice", "18.5.1-ee", whole(text), "true", "rebase"),
+
 		{name: "the same diff", old: compared(t, text), newer: compared(t, text), want: "true", trigger: "rebase"},
 		{name: "the same diff, and the other fields of the real answer", old: compared(t, text),
 			newer: compared(t, with("generated_file", false)), want: "true", trigger: "rebase"},
@@ -204,8 +271,6 @@ func TestRebaseOnlyFromTheCompareAPI(t *testing.T) {
 		{name: "null diffs, twice", old: `{"diffs": null}`, newer: `{"diffs": null}`, want: "unknown", trigger: "push"},
 		{name: "compare_timeout, twice", old: `{"diffs": [], "compare_timeout": true}`, newer: `{"diffs": [], "compare_timeout": true}`, want: "unknown", trigger: "push"},
 		{name: "a binary file, twice", old: compared(t, text, binary), newer: compared(t, text, binary), want: "unknown", trigger: "push"},
-		{name: "a diff too large, twice", old: compared(t, with("too_large", true)), newer: compared(t, with("too_large", true)), want: "unknown", trigger: "push"},
-		{name: "a collapsed diff, twice", old: compared(t, with("collapsed", true)), newer: compared(t, with("collapsed", true)), want: "unknown", trigger: "push"},
 		{name: "the old commits are gone", newer: compared(t, text), want: "unknown", trigger: "push"},
 	}
 	for _, tt := range tests {
@@ -215,6 +280,9 @@ func TestRebaseOnlyFromTheCompareAPI(t *testing.T) {
 				f.compare["base1..head1"] = tt.old
 			}
 			prev, s := pushed(patchA, patchA)
+			if tt.release != "" {
+				f.release, prev.Patch = tt.release, ""
+			}
 			e := onlyPush(t, &Differ{Client: f.client(t), People: People{Me: "me"}}, prev, s)
 			if got := rebaseOnly(e); got != tt.want || e.Trigger() != tt.trigger {
 				t.Errorf("rebase_only = %s, trigger %s; want %s, %s", got, e.Trigger(), tt.want, tt.trigger)

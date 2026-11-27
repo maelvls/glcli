@@ -142,8 +142,12 @@ type VersionDiff struct {
 	NewFile     bool   `json:"new_file"`
 	RenamedFile bool   `json:"renamed_file"`
 	DeletedFile bool   `json:"deleted_file"`
-	TooLarge    bool   `json:"too_large"`
-	Collapsed   bool   `json:"collapsed"`
+	// TooLarge and Collapsed say that GitLab left the diff out (it is
+	// then empty). The compare API only sends them from GitLab 18.4 on:
+	// nil means GitLab did not say, not that the diff is whole. Before
+	// 18.4, a diff left out is empty and nothing tells.
+	TooLarge  *bool `json:"too_large"`
+	Collapsed *bool `json:"collapsed"`
 }
 
 // VersionDetail is GET .../versions/:id.

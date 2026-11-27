@@ -25,14 +25,11 @@ import (
 // patch-id, it changes when the target branch changed the context lines
 // of a hunk.
 //
-// known is false when the changes cannot be seen: GitLab left a diff out
-// for being too large or collapsed, or a file has no changed line and is
-// neither a pure rename nor a mode change (a binary file, whose diff is
-// "Binary files a/x and b/x differ" whatever changed in it).
+// known is false when the changes cannot be seen: see visible.
 func PatchID(diffs []gitlab.VersionDiff) (sum string, known bool) {
 	files := make([]string, 0, len(diffs))
 	for _, d := range diffs {
-		if d.TooLarge || d.Collapsed || !visible(d) {
+		if !visible(d) {
 			return "", false
 		}
 		var b strings.Builder
@@ -61,19 +58,36 @@ func PatchID(diffs []gitlab.VersionDiff) (sum string, known bool) {
 	return hex.EncodeToString(h.Sum(nil))[:16], true
 }
 
-// visible reports whether the diff of a file shows what changed in it:
-// it has added or removed lines, or it is empty for a file that was only
-// renamed or whose mode only changed. GitLab's diffs start at the first
-// hunk, without ---/+++ headers, so every line starting with - or + is a
-// change, including "-- a comment".
+// visible reports whether the diff of a file shows what changed in it.
+//
+// It does when it has added or removed lines. GitLab's diffs start at
+// the first hunk, without ---/+++ headers, so every line starting with -
+// or + is a change, including "-- a comment".
+//
+// It does not when GitLab says it left the diff out (too_large,
+// collapsed), nor when it is a notice: a binary file reads "Binary files
+// a/x and b/x differ" whatever changed in it.
+//
+// An empty diff is that of a file only renamed, or whose mode only
+// changed, but also what is left of a diff GitLab left out. Only GitLab
+// 18.4 or newer tells the two apart, with too_large and collapsed, both
+// false. Before, an empty diff shows nothing, whatever the rename and
+// the modes say: a file renamed and edited, whose diff was left out for
+// its size, looks the same after any further edit.
 func visible(d gitlab.VersionDiff) bool {
+	if d.TooLarge != nil && *d.TooLarge || d.Collapsed != nil && *d.Collapsed {
+		return false
+	}
 	for _, line := range strings.Split(d.Diff, "\n") {
 		if line != "" && (line[0] == '+' || line[0] == '-') {
 			return true
 		}
 	}
 	if strings.TrimSpace(d.Diff) != "" {
-		return false // a notice, not a diff: "Binary files ... differ"
+		return false // a notice, not a diff
+	}
+	if d.TooLarge == nil || d.Collapsed == nil {
+		return false // GitLab before 18.4: maybe a diff left out
 	}
 	modeChange := d.AMode != "" && d.BMode != "" && d.AMode != d.BMode && !d.NewFile && !d.DeletedFile
 	return d.RenamedFile || modeChange
