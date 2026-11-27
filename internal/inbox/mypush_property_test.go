@@ -13,129 +13,174 @@ import (
 // histories is how many random histories each property is tried on.
 const histories = 30000
 
-// history builds a random history of a merge request of bob that I
-// review, opened with patch A at :02: comments and review notes of mine,
-// pushes of bob and of mine with their notes, review requests. full
-// allows my approvals (never standing: I am not among the approvers) and
-// retargets.
-func history(rng *rand.Rand, full bool) (versions []gitlab.Version, notes []gitlab.Note, story []string, minute int) {
+// world is a random history of a merge request of bob that I review,
+// opened with patch A at :02: comments and review notes of mine, pushes
+// of bob and of mine with their notes, review requests, retargets.
+//
+// My approval stands or falls as GitLab would make it (modelled by hand):
+// it stands from my "approved" note until a push whose patch is not the
+// one I approved, a review requested again, a retarget, or my "requested
+// changes". While it stands I am among the approvers.
+type world struct {
+	versions []gitlab.Version
+	notes    []gitlab.Note
+	story    []string
+	minute   int
+	// approved is the patch I approved, while my approval stands.
+	standing bool
+	approved string
+}
+
+func (w *world) tick(rng *rand.Rand) { w.minute += 1 + rng.Intn(3) }
+
+func (w *world) note(user, body string, system bool, told string) {
+	w.notes = append(w.notes, note(len(w.notes)+1, user, w.minute, body, system))
+	w.story = append(w.story, fmt.Sprintf(":%02d %s", w.minute, told))
+}
+
+// push adds a diff version and the note GitLab writes under who pushed.
+func (w *world) push(user, patch string) {
+	w.versions = append([]gitlab.Version{version(w.minute, patch)}, w.versions...)
+	w.notes = append(w.notes, pushBy(len(w.notes)+1, user, w.minute))
+	w.story = append(w.story, fmt.Sprintf(":%02d %s pushes %q", w.minute, user, patch))
+	if patch != w.approved {
+		w.standing = false
+	}
+}
+
+func (w *world) newest() string { return w.versions[0].PatchIDSHA }
+
+func (w *world) item() Item {
+	s := snap("bob", w.notes...)
+	s.Versions = w.versions
+	if w.standing {
+		s.Approvals = approvedBy("me")
+	}
+	return reviewItemWith(s, me, yes)
+}
+
+func (w *world) String() string {
+	return fmt.Sprintf("%s\n(my approval stands: %v)", strings.Join(w.story, "\n"), w.standing)
+}
+
+// history builds a random world; retargets says whether it may have some.
+func history(rng *rand.Rand, retargets bool) *world {
 	patches := []string{"A", "B", "C"}
-	versions = append(versions, version(2, "A"))
-	minute = 2
+	w := &world{versions: []gitlab.Version{version(2, "A")}, minute: 2}
 	for n := rng.Intn(8); n > 0; n-- {
-		minute += 1 + rng.Intn(3)
-		id := len(notes) + 1
+		w.tick(rng)
 		k := rng.Intn(10)
-		if !full && (k == 2 || k == 9) {
+		if !retargets && k == 9 {
 			k = 0
 		}
 		switch k {
 		case 0, 1:
-			notes = append(notes, note(id, "me", minute, "nit", false))
-			story = append(story, fmt.Sprintf(":%02d I comment", minute))
+			w.note("me", "nit", false, "I comment")
 		case 2:
-			notes = append(notes, note(id, "me", minute, approvedNote, true))
-			story = append(story, fmt.Sprintf(":%02d I approve", minute))
+			w.note("me", approvedNote, true, "I approve")
+			w.standing, w.approved = true, w.newest()
 		case 3:
-			body := []string{requestedChangesNote, reviewedNote}[rng.Intn(2)]
-			notes = append(notes, note(id, "me", minute, body, true))
-			story = append(story, fmt.Sprintf(":%02d I: %s", minute, body))
+			if rng.Intn(2) == 0 {
+				w.note("me", requestedChangesNote, true, "I request changes")
+				w.standing = false
+			} else {
+				w.note("me", reviewedNote, true, "I submit a review without a comment")
+			}
 		case 4, 5, 6:
-			p := patches[rng.Intn(len(patches))]
-			versions = append([]gitlab.Version{version(minute, p)}, versions...)
-			notes = append(notes, pushBy(id, "bob", minute))
-			story = append(story, fmt.Sprintf(":%02d bob pushes %q", minute, p))
+			w.push("bob", patches[rng.Intn(len(patches))])
 		case 7:
-			p := patches[rng.Intn(len(patches))]
-			versions = append([]gitlab.Version{version(minute, p)}, versions...)
-			notes = append(notes, pushBy(id, "me", minute))
-			story = append(story, fmt.Sprintf(":%02d I push %q", minute, p))
+			w.push("me", patches[rng.Intn(len(patches))])
 		case 8:
-			notes = append(notes, note(id, "bob", minute, "requested review from @me", true))
-			story = append(story, fmt.Sprintf(":%02d review requested", minute))
+			w.note("bob", "requested review from @me", true, "my review is requested")
+			w.standing = false
 		case 9:
-			notes = append(notes, note(id, "bob", minute, retargetNote, true))
-			story = append(story, fmt.Sprintf(":%02d retargeted", minute))
+			w.note("bob", retargetNote, true, "bob retargets")
+			w.standing = false
 		}
 	}
-	return versions, notes, story, minute
+	return w
 }
 
-func itemFor(versions []gitlab.Version, notes []gitlab.Note) Item {
-	s := snap("bob", notes...)
-	s.Versions = versions
-	return reviewItemWith(s, me, yes)
-}
-
-// With trusted patch IDs, a push of mine never adds a reason, and never
-// makes one newer, whatever came before: inbox wait must not fire for
-// what I push myself. One exception to "never newer", pinned in
-// TestMyPushAfterARebaseOfSomeoneElse: my push brings the patch back to
-// one I know, and a doubt that the change hid (a retarget) is left, with
-// its own date.
+// With trusted patch IDs, a push of mine adds no reason and makes none
+// newer: inbox wait must not fire for what I push myself. Two exceptions:
+//
+//   - My push changes the patch I approved, so GitLab takes my approval
+//     away: the merge request no longer has it, and a rebase by someone
+//     else that had kept it now looks like what removed it (the snapshot
+//     cannot tell which push did). new_commits then, dated from that
+//     rebase, never from my push.
+//   - My push brings the patch back to one I know, and a doubt that the
+//     change hid (a retarget) is left, with its own date: newer than the
+//     change, older than my push. Pinned in
+//     TestMyPushAfterARebaseOfSomeoneElse.
 func TestMyPushAddsNothingWhateverCameBefore(t *testing.T) {
 	rng := rand.New(rand.NewSource(2))
-	changed, moved := 0, 0
+	removed, reset, moved := 0, 0, 0
 	for i := 0; i < histories; i++ {
-		versions, notes, story, minute := history(rng, true)
-		before := itemFor(versions, notes)
+		w := history(rng, true)
+		before, stood, told := w.item(), w.standing, w.String()
 		p := []string{"A", "B", "C", "D"}[rng.Intn(4)]
 		if rng.Intn(2) == 0 {
-			p = versions[0].PatchIDSHA
+			p = w.newest()
 		}
-		minute += 1 + rng.Intn(3)
-		versions = append([]gitlab.Version{version(minute, p)}, versions...)
-		notes = append(notes, pushBy(len(notes)+1, "me", minute))
-		after := itemFor(versions, notes)
+		w.tick(rng)
+		w.push("me", p)
+		after := w.item()
+		fail := func(what string) {
+			t.Helper()
+			t.Fatalf("my push %q at :%02d %s:\n%s\nbefore: %v at %v\nafter:  %v at %v", p, w.minute, what, told, before.Reasons, before.At, after.Reasons, after.At)
+		}
+		if after.Waiting() && !after.At.Before(at(w.minute)) {
+			fail("dates the item")
+		}
+		if stood && !w.standing {
+			reset++
+			continue
+		}
 		for _, r := range after.Reasons {
 			if !slices.Contains(before.Reasons, r) {
-				t.Fatalf("my push %q at :%02d adds %s:\n%s\nbefore: %v at %v\nafter:  %v at %v", p, minute, r, strings.Join(story, "\n"), before.Reasons, before.At, after.Reasons, after.At)
+				fail("adds " + r)
 			}
 		}
-		if len(after.Reasons) != 0 && after.At.After(before.At) {
-			// Allowed only when my push brought the patch back to one I
-			// know, which leaves a doubt (retarget, approval gone) dated
-			// from something that is not my push.
+		if after.Waiting() && after.At.After(before.At) {
 			back := false
-			for _, v := range versions[1:] {
+			for _, v := range w.versions[1:] {
 				back = back || v.PatchIDSHA == p
 			}
-			mine := false
-			for _, n := range notes {
-				mine = mine || n.Author.Username == "me" && n.CreatedAt.Equal(after.At) && strings.HasPrefix(n.Body, "added ")
-			}
-			if !back || mine || !after.At.Before(at(minute)) {
-				t.Fatalf("my push %q at :%02d makes it newer:\n%s\nbefore: %v at %v\nafter:  %v at %v", p, minute, strings.Join(story, "\n"), before.Reasons, before.At, after.Reasons, after.At)
+			if !back {
+				fail("makes it newer")
 			}
 			moved++
 		}
 		if !slices.Equal(before.Reasons, after.Reasons) {
-			changed++
+			removed++
 		}
 	}
-	t.Logf("my push removed a reason in %d histories of %d, and left an older doubt with a newer date in %d", changed, histories, moved)
+	t.Logf("of %d histories, my push removed a reason in %d, took my approval away in %d, and left an older doubt with a newer date in %d", histories, removed, reset, moved)
 }
 
-// With trusted patch IDs, no approval of mine and no retarget, a rebase
-// by someone else that keeps the newest patch changes nothing, whatever
-// came before, pushes of mine included: neither the reasons nor their
-// date.
+// With trusted patch IDs and no retarget, a rebase by someone else that
+// keeps the newest patch changes nothing, whatever came before, pushes
+// and approvals of mine included: neither the reasons nor their date.
+// (After a retarget, the rebase is when #7 tells me of it.)
 func TestRebaseOfSomeoneElseChangesNothingWhateverCameBefore(t *testing.T) {
 	rng := rand.New(rand.NewSource(3))
-	waiting := 0
+	waiting, approved := 0, 0
 	for i := 0; i < histories; i++ {
-		versions, notes, story, minute := history(rng, false)
-		before := itemFor(versions, notes)
-		minute += 1 + rng.Intn(3)
-		versions = append([]gitlab.Version{version(minute, versions[0].PatchIDSHA)}, versions...)
-		notes = append(notes, pushBy(len(notes)+1, "bob", minute))
-		after := itemFor(versions, notes)
-		if !slices.Equal(before.Reasons, after.Reasons) || len(after.Reasons) != 0 && !after.At.Equal(before.At) {
-			t.Fatalf("a rebase by bob at :%02d changes the item:\n%s\nbefore: %v at %v\nafter:  %v at %v", minute, strings.Join(story, "\n"), before.Reasons, before.At, after.Reasons, after.At)
+		w := history(rng, false)
+		before, told := w.item(), w.String()
+		w.tick(rng)
+		w.push("bob", w.newest())
+		after := w.item()
+		if !slices.Equal(before.Reasons, after.Reasons) || after.Waiting() && !after.At.Equal(before.At) {
+			t.Fatalf("a rebase by bob at :%02d changes the item:\n%s\nbefore: %v at %v\nafter:  %v at %v", w.minute, told, before.Reasons, before.At, after.Reasons, after.At)
 		}
 		if after.Waiting() {
 			waiting++
 		}
+		if w.standing {
+			approved++
+		}
 	}
-	t.Logf("%d histories of %d had a reason", waiting, histories)
+	t.Logf("of %d histories, %d had a reason and %d my approval standing", histories, waiting, approved)
 }

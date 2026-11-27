@@ -486,10 +486,12 @@ func doubts(s *mr.Snapshot, me string, seenAt time.Time, mine []bool) (retargete
 				continue
 			}
 			if strings.HasPrefix(n.Body, "changed target branch") || strings.Contains(n.Body, "This merge request now targets") {
-				if n.CreatedAt.After(seenAt) {
-					retargeted = later(retargeted, n.CreatedAt)
-				} else {
+				switch {
+				case !n.CreatedAt.After(seenAt):
 					aware = later(aware, n.CreatedAt)
+				case n.Author.Username != me:
+					// A retarget of mine is nothing I have to see.
+					retargeted = later(retargeted, n.CreatedAt)
 				}
 			}
 			if !n.CreatedAt.After(seenAt) && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
@@ -513,10 +515,19 @@ func doubts(s *mr.Snapshot, me string, seenAt time.Time, mine []bool) (retargete
 	// approvers: GitLab removed my approval. Whatever I knew of it, the
 	// changes were others for a while since what I last saw (changed, then
 	// back, by someone else): that may be what removed it, and I did not
-	// act since.
+	// act since. From the version I saw to the newest: I know the patch of
+	// a push of mine, a push of someone else with another patch is that
+	// change, and their rebase of what I pushed is not.
 	saw := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(seenAt) })
-	for i := 0; i < saw; i++ {
-		if v := s.Versions[i]; !mine[i] && v.PatchIDSHA != "" && v.PatchIDSHA != s.Versions[saw].PatchIDSHA {
+	known := ""
+	if saw >= 0 {
+		known = s.Versions[saw].PatchIDSHA
+	}
+	for i := saw - 1; i >= 0; i-- {
+		switch v := s.Versions[i]; {
+		case mine[i]:
+			known = v.PatchIDSHA
+		case v.PatchIDSHA != "" && v.PatchIDSHA != known:
 			return retargeted, true
 		}
 	}
