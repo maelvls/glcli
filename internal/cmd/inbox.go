@@ -10,7 +10,6 @@ import (
 
 	"github.com/maelvls/glcli/internal/cli"
 	"github.com/maelvls/glcli/internal/inbox"
-	"github.com/maelvls/glcli/internal/mr"
 )
 
 type inboxFlags struct {
@@ -19,6 +18,9 @@ type inboxFlags struct {
 	roles   []string
 	maxBody int
 	ignore  []string
+	include []string
+	// cache is set by inbox wait, which collects again and again.
+	cache *inbox.Cache
 }
 
 var validRoles = []string{"review", "authored", "todo"}
@@ -35,6 +37,7 @@ func addInboxFlags(cmd *cobra.Command, f *inboxFlags) {
 	cmd.Flags().StringSliceVar(&f.roles, "role", validRoles, "Sources: review (MRs I review), authored (MRs I opened), todo (my to-do items)")
 	cmd.Flags().IntVar(&f.maxBody, "max-body-chars", 500, "Cut to-do bodies after this many characters (0: no limit)")
 	cmd.Flags().StringSliceVar(&f.ignore, "ignore-author", nil, "Usernames whose comments do not count (bots are already left out); repeatable")
+	cmd.Flags().StringSliceVar(&f.include, "include-author", nil, includeAuthorUsage)
 }
 
 type inboxResult struct {
@@ -63,10 +66,7 @@ func collectInbox(ctx context.Context, rt *cli.Runtime, f inboxFlags) (*inboxRes
 	if err != nil {
 		return nil, nil, err
 	}
-	people := mr.People{Me: me, Ignore: map[string]bool{}}
-	for _, u := range f.ignore {
-		people.Ignore[strings.TrimPrefix(u, "@")] = true
-	}
+	people := newPeople(me, f.ignore, f.include)
 	checkedAt := rt.Now().Round(0).Truncate(time.Second)
 	res, err := inbox.Collect(ctx, c, inbox.Options{
 		Host:   host,
@@ -77,6 +77,7 @@ func collectInbox(ctx context.Context, rt *cli.Runtime, f inboxFlags) (*inboxRes
 			Todo:     slices.Contains(f.roles, "todo"),
 		},
 		MaxBodyChars: f.maxBody,
+		Cache:        f.cache,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -111,12 +112,14 @@ or the default one), newest first:
 
   review    open merge requests where I am a reviewer, with the reasons:
             review_requested (never reviewed, or review requested again
-            after my last action), new_commits (pushed after my last
-            comment, and not approved by me; on GitLab 18.2 or newer, a
-            rebase that keeps the patch ID of the changes does not count,
-            and "at" is when the change I have not seen arrived; on older
+            after my last review: a comment, an approval or its removal,
+            requested changes; a push of mine is not a review),
+            new_commits (pushed by someone else after my last review,
+            and not approved by me; on GitLab 18.2 or newer, a rebase
+            that keeps the patch ID of the changes does not count, and
+            "at" is when the change I have not seen arrived; on older
             ones every push counts), new_replies (in a thread I took part
-            in, or mentioning me, after my last comment)
+            in, or mentioning me, after my last comment or push)
   authored  my open merge requests: new_comments (after my last comment
             or push), pipeline_failed, ready_to_merge
   todo      my pending to-do items (mentions, directly addressed, approval
@@ -180,10 +183,19 @@ Pass the "checked_at" of the previous inbox or inbox wait as --since so
 that nothing is missed between two commands.
 
 It polls every --interval (2m), keeps trying while GitLab cannot be
-reached, and has no time limit unless --timeout. Prints what "inbox"
-prints; on timeout, items is [], timed_out is true, and checked_at is the
---since to wait again with. Exit codes: 0 (also on timeout), 1 on error,
-130 when interrupted.`,
+reached, and has no time limit unless --timeout. Between two polls, a
+merge request whose updated_at did not change is not read again (my own
+ones: only their pipeline and merge status; those I approved: only their
+approvals), except once every 20 minutes, and right after a change. So
+what GitLab does without changing updated_at, such as a push that leaves
+no "added N commits" note, can be reported late: up to 20 minutes after
+that merge request was last read in full, rounded up to a poll (longer
+if --interval is longer). When something is new, everything is read
+again before it is printed.
+
+Prints what "inbox" prints; on timeout, items is [], timed_out is true,
+and checked_at is the --since to wait again with. Exit codes: 0 (also on
+timeout), 1 on error, 130 when interrupted.`,
 		Example: `  glcli inbox wait
   glcli inbox wait --since 2026-11-26T14:30:00+01:00 --timeout 4h
   glcli inbox wait --role review,todo --interval 5m`,
@@ -200,8 +212,9 @@ prints; on timeout, items is [], timed_out is true, and checked_at is the
 			if since.IsZero() {
 				since = rt.Now().Round(0).Truncate(time.Second)
 			}
+			f.cache = inbox.NewCache(rt.Now)
 			var res *inboxResult
-			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
+			check := func() (bool, error) {
 				rt.ResetWarnings()
 				r, items, err := collectInbox(ctx, rt, f)
 				if err != nil {
@@ -210,6 +223,18 @@ prints; on timeout, items is [], timed_out is true, and checked_at is the
 				res = r
 				res.Items = filterItems(items, since, false)
 				return len(res.Items) > 0, nil
+			}
+			timedOut, err := rt.Poll(ctx, w.interval, w.timeout, func() (bool, error) {
+				if done, err := check(); !done || err != nil || !f.cache.Kept() {
+					return done, err
+				}
+				// The checked_at printed with what is new is the --since of
+				// the next wait: what happened before it on a merge request
+				// that was not read again (see inbox.Cache) would be lost
+				// for good. So everything is read before anything is
+				// printed, and the wait goes on if nothing is new after all.
+				f.cache.Expire()
+				return check()
 			})
 			if err != nil {
 				return err

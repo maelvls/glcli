@@ -29,7 +29,7 @@ type mrContext struct {
 	people mr.People
 }
 
-func openMR(ctx context.Context, rt *cli.Runtime, arg string, ignore []string) (*mrContext, error) {
+func openMR(ctx context.Context, rt *cli.Runtime, arg string, ignore, include []string) (*mrContext, error) {
 	r, err := rt.MR(arg)
 	if err != nil {
 		return nil, usageError{err}
@@ -42,11 +42,22 @@ func openMR(ctx context.Context, rt *cli.Runtime, arg string, ignore []string) (
 	if err != nil {
 		return nil, err
 	}
-	p := mr.People{Me: me, Ignore: map[string]bool{}}
+	return &mrContext{ref: r, client: c, people: newPeople(me, ignore, include)}, nil
+}
+
+const includeAuthorUsage = "Usernames whose comments count although they look like bots (such as a service account); repeatable. --ignore-author wins for a username given to both"
+
+// newPeople reads --ignore-author and --include-author: usernames, with
+// or without "@".
+func newPeople(me string, ignore, include []string) mr.People {
+	p := mr.People{Me: me, Ignore: map[string]bool{}, Include: map[string]bool{}}
 	for _, u := range ignore {
 		p.Ignore[strings.TrimPrefix(u, "@")] = true
 	}
-	return &mrContext{ref: r, client: c, people: p}, nil
+	for _, u := range include {
+		p.Include[strings.TrimPrefix(u, "@")] = true
+	}
+	return p
 }
 
 func newMRGet(rt *cli.Runtime) *cobra.Command {
@@ -55,6 +66,7 @@ func newMRGet(rt *cli.Runtime) *cobra.Command {
 		description bool
 		maxBody     int
 		ignore      []string
+		include     []string
 	)
 	cmd := &cobra.Command{
 		Use:   "get <mr>",
@@ -80,7 +92,7 @@ Prints {ref, url, title, state, ..., cursor, events}.`,
 					return usageError{err}
 				}
 			}
-			m, err := openMR(ctx, rt, args[0], ignore)
+			m, err := openMR(ctx, rt, args[0], ignore, include)
 			if err != nil {
 				return err
 			}
@@ -110,6 +122,7 @@ Prints {ref, url, title, state, ..., cursor, events}.`,
 	cmd.Flags().BoolVar(&description, "description", false, "Include the description")
 	cmd.Flags().IntVar(&maxBody, "max-body-chars", 4000, "Cut the description and comment bodies after this many characters (0: no limit)")
 	cmd.Flags().StringSliceVar(&ignore, "ignore-author", nil, "Usernames whose comments do not count as human (bots are already left out); repeatable")
+	cmd.Flags().StringSliceVar(&include, "include-author", nil, includeAuthorUsage)
 	return cmd
 }
 
@@ -126,6 +139,7 @@ func newMRWait(rt *cli.Runtime) *cobra.Command {
 		includeMine bool
 		maxBody     int
 		ignore      []string
+		include     []string
 		w           waitFlags
 	)
 	cmd := &cobra.Command{
@@ -191,7 +205,7 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 					return usagef("--on %q: valid values are %s", t, strings.Join(mr.Triggers, ", "))
 				}
 			}
-			m, err := openMR(ctx, rt, args[0], ignore)
+			m, err := openMR(ctx, rt, args[0], ignore, include)
 			if err != nil {
 				return err
 			}
@@ -273,6 +287,7 @@ When --timeout runs out: events [], timed_out true, and mr.cursor is the
 	cmd.Flags().BoolVar(&includeMine, "include-mine", false, "Let my own pushes, approvals, resolves, merges and closes end the wait too")
 	cmd.Flags().IntVar(&maxBody, "max-body-chars", 4000, "Cut comment bodies after this many characters (0: no limit)")
 	cmd.Flags().StringSliceVar(&ignore, "ignore-author", nil, "Usernames whose comments do not count (bots are already left out); repeatable")
+	cmd.Flags().StringSliceVar(&include, "include-author", nil, includeAuthorUsage)
 	addWaitFlags(cmd, &w, defaultMRInterval)
 	return cmd
 }
@@ -314,7 +329,7 @@ what a reply or a resolve needs.`,
 				}
 				f.AfterNote = prev.MaxNote
 			}
-			m, err := openMR(ctx, rt, args[0], nil)
+			m, err := openMR(ctx, rt, args[0], nil, nil)
 			if err != nil {
 				return err
 			}
