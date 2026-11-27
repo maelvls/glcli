@@ -48,8 +48,12 @@ func run(rt *cli.Runtime, args []string) int {
 		}
 		return nil
 	}
+	unknown := catchUnknownCommands(root)
 	err := root.ExecuteContext(ctx)
 	cancel()
+	if err == nil {
+		err = unknown()
+	}
 	if err == nil {
 		return 0
 	}
