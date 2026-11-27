@@ -46,6 +46,9 @@ type inboxResult struct {
 	Items     []inbox.Item `json:"items"`
 	CheckedAt time.Time    `json:"checked_at"`
 	TimedOut  bool         `json:"timed_out,omitempty"`
+	// unread are the merge requests that could not be read: see
+	// inbox.Result.
+	unread []string
 }
 
 func collectInbox(ctx context.Context, rt *cli.Runtime, f inboxFlags) (*inboxResult, []inbox.Item, error) {
@@ -85,7 +88,7 @@ func collectInbox(ctx context.Context, rt *cli.Runtime, f inboxFlags) (*inboxRes
 	for _, w := range res.Warnings {
 		rt.Warnf("%s", w)
 	}
-	return &inboxResult{Me: me, Host: host, CheckedAt: checkedAt}, res.Items, nil
+	return &inboxResult{Me: me, Host: host, CheckedAt: checkedAt, unread: res.Unread}, res.Items, nil
 }
 
 func filterItems(items []inbox.Item, since time.Time, all bool) []inbox.Item {
@@ -208,8 +211,8 @@ interruption. Every line has a "type" and the "checked_at" to resume from
   {"type":"end","reason":"timeout|interrupted","checked_at":"..."}
   {"type":"error","error":"...","checked_at":"..."}
 
-An item is printed again only when its reasons or its "at" change. One
-that shows up late with an older "at" (a review requested on an old
+An item is printed again only when it gains a reason or its "at" moves
+forward (not when a reason goes away). One that shows up late with an older "at" (a review requested on an old
 merge request) is printed too, but only by a stream that was already
 running: a new one only sees what is newer than its --since. A warning
 line comes once per outage, and another when GitLab answers again. An
@@ -296,65 +299,99 @@ type inboxItemsLine struct {
 }
 
 // followInbox is the loop of "inbox wait --follow". inbox has no cursor,
-// only times: an item is new when what is printed of it, its reasons and
-// its "at", differs from what was last printed of it. The first poll,
-// which reads everything, sets aside what is older than since, as inbox
-// wait does; after that, an item is new whatever its "at", so one that
-// shows up late with an older "at" (a review requested on an old merge
-// request, a to-do item dated in the past) is printed once, where
-// waiting again with --since would not see it.
+// only times. The stream remembers the last state of each waiting item
+// (its reasons and "at") and prints an item when it is new: never seen,
+// a reason that the last state did not have, or an "at" later than the
+// last state's. A reason that goes away is not news (the item is not
+// printed again), but the state is still recorded, so the reason counts
+// as new if it comes back. An item that stops waiting keeps its last
+// state: back unchanged, it is not printed again.
+//
+// The first time an item is read, an "at" older than since sets it aside
+// as already known, as inbox wait does: at the first poll, and for a
+// merge request that could not be read then (inbox.Result.Unread), at
+// its first successful read. After that an item is new whatever its
+// "at", so one that shows up late with an older "at" (a review requested
+// on an old merge request, a to-do item dated in the past) is printed
+// once, where waiting again with --since would not see it.
 //
 // What is printed comes from a poll that read everything, as in inbox
 // wait (see inbox.Cache): its checked_at is a --since from which a new
 // wait misses nothing that this line did not print, and becomes the
 // checked_at of the lines that do not carry results (*resume).
 func followInbox(ctx context.Context, rt *cli.Runtime, st *stream, f inboxFlags, w waitFlags, since time.Time, resume *time.Time) error {
-	printed := map[string]string{}
+	last := map[string]inbox.Item{}
 	first := true
+	// unbased are the URLs not read yet, to which the since rule still
+	// applies.
+	unbased := map[string]bool{}
+	// record notes what a poll read: the first reading of an item sets
+	// it aside when older than since; every waiting item's state is kept.
+	record := func(res *inboxResult, items []inbox.Item) {
+		unread := map[string]bool{}
+		for _, u := range res.unread {
+			unread[u] = true
+			if first {
+				unbased[u] = true
+			}
+		}
+		for _, it := range items {
+			if !it.Waiting() {
+				continue
+			}
+			if (first || unbased[it.URL]) && !unread[it.URL] {
+				delete(unbased, it.URL)
+				if _, ok := last[it.URL]; !ok && !it.At.After(since) {
+					last[it.URL] = it
+				}
+			}
+		}
+		first = false
+	}
 	fresh := func(items []inbox.Item) []inbox.Item {
 		var out []inbox.Item
 		for _, it := range items {
-			if it.Waiting() && printed[it.URL] != itemPrint(it) {
+			if it.Waiting() && itemIsNews(last, it) {
 				out = append(out, it)
 			}
 		}
 		return out
 	}
+	remember := func(items []inbox.Item) {
+		for _, it := range items {
+			if it.Waiting() {
+				last[it.URL] = it
+			}
+		}
+	}
+	// read collects once; answered is only called once every request of
+	// the poll has succeeded, so that the stream and PollNotify agree on
+	// whether GitLab answers (a forced read that fails keeps the outage).
 	timedOut, err := rt.PollNotify(ctx, w.interval, w.timeout, func() (bool, error) {
 		rt.ResetWarnings()
 		res, items, err := collectInbox(ctx, rt, f)
 		if err != nil {
 			return false, err
 		}
-		st.answered()
-		if first {
-			first = false
-			for _, it := range items {
-				if it.Waiting() && !it.At.After(since) {
-					printed[it.URL] = itemPrint(it)
-				}
-			}
-		}
+		record(res, items)
 		news := fresh(items)
-		if len(news) == 0 {
-			return false, nil
-		}
-		if f.cache.Kept() {
+		if len(news) > 0 && f.cache.Kept() {
 			// Read everything before printing, as inbox wait does.
 			f.cache.Expire()
 			rt.ResetWarnings()
 			if res, items, err = collectInbox(ctx, rt, f); err != nil {
 				return false, err
 			}
-			if news = fresh(items); len(news) == 0 {
-				return false, nil
-			}
+			record(res, items)
+			news = fresh(items)
+		}
+		st.answered()
+		remember(items)
+		if len(news) == 0 {
+			return false, nil
 		}
 		if err := rt.PrintLine(inboxItemsLine{Type: "items", Items: news, CheckedAt: res.CheckedAt}, "items"); err != nil {
 			return false, err
-		}
-		for _, it := range news {
-			printed[it.URL] = itemPrint(it)
 		}
 		*resume = res.CheckedAt
 		return false, nil
@@ -368,8 +405,17 @@ func followInbox(ctx context.Context, rt *cli.Runtime, st *stream, f inboxFlags,
 	return nil
 }
 
-// itemPrint is what makes an item new for inbox wait --follow: its
-// reasons and when the newest one happened.
-func itemPrint(it inbox.Item) string {
-	return strings.Join(it.Reasons, ",") + "@" + it.At.UTC().Format(time.RFC3339Nano)
+// itemIsNews says whether inbox wait --follow prints it: never seen, a
+// reason that the last state did not have, or a later "at".
+func itemIsNews(last map[string]inbox.Item, it inbox.Item) bool {
+	prev, ok := last[it.URL]
+	if !ok || it.At.After(prev.At) {
+		return true
+	}
+	for _, r := range it.Reasons {
+		if !slices.Contains(prev.Reasons, r) {
+			return true
+		}
+	}
+	return false
 }

@@ -29,6 +29,10 @@ type streamInboxMR struct {
 	createdAt string
 	from      int
 	notes     []streamInboxNote
+	// Its discussions fail (HTTP 500) while the list was asked fewer
+	// than failBefore times, or always with failAlways.
+	failBefore int
+	failAlways bool
 }
 
 // streamInboxNote is a note mentioning me: new_replies at its time.
@@ -37,6 +41,13 @@ type streamInboxNote struct {
 	by   string
 	at   string
 	from int
+	// until, when set, is the request of the list from which the note is
+	// gone (deleted).
+	until int
+}
+
+func (g *streamInboxGitLab) noteShown(n streamInboxNote) bool {
+	return g.shown(n.from) && (n.until == 0 || g.lists < n.until)
 }
 
 func (g *streamInboxGitLab) shown(from int) bool { return from == 0 || g.lists >= from }
@@ -58,7 +69,7 @@ func (g *streamInboxGitLab) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mergeRequest := func(m *streamInboxMR) string {
 		updatedAt := m.createdAt
 		for _, n := range m.notes {
-			if g.shown(n.from) && n.at > updatedAt {
+			if g.noteShown(n) && n.at > updatedAt {
 				updatedAt = n.at
 			}
 		}
@@ -93,9 +104,13 @@ func (g *streamInboxGitLab) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "versions":
 			fmt.Fprint(w, `[{"id":1,"head_commit_sha":"abc","created_at":"`+m.createdAt+`"}]`)
 		case "discussions":
+			if m.failAlways || g.lists < m.failBefore {
+				http.Error(w, `{"message":"500 Internal Server Error"}`, 500)
+				return
+			}
 			var ds []string
 			for _, n := range m.notes {
-				if g.shown(n.from) {
+				if g.noteShown(n) {
 					ds = append(ds, fmt.Sprintf(`{"id":"d%d","individual_note":true,"notes":[{"id":%d,"body":"@me can you look?","author":{"username":%q},"created_at":%q}]}`, n.id, n.id, n.by, n.at))
 				}
 			}

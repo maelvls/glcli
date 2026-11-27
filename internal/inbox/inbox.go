@@ -71,6 +71,10 @@ type Options struct {
 type Result struct {
 	Items    []Item
 	Warnings []string
+	// Unread are the URLs of the merge requests that could not be read
+	// (each has a warning): they are missing from Items, or only there
+	// as a to-do item.
+	Unread []string
 }
 
 // Collect lists the open merge requests I review or authored, and my
@@ -153,6 +157,7 @@ func Collect(ctx context.Context, c *gitlab.Client, o Options) (*Result, error) 
 	for i, err := range errs {
 		if err != nil {
 			res.Warnings = append(res.Warnings, mrs[i].m.WebURL+": "+err.Error())
+			res.Unread = append(res.Unread, mrs[i].m.WebURL)
 			continue
 		}
 		byURL[items[i].URL] = len(res.Items)
