@@ -18,7 +18,12 @@ type Cursor struct {
 	Version int    `json:"v,omitempty"`
 	// Base is the base commit of the head version: with SHA, it gives
 	// the changes of the merge request, to tell a rebase from a change.
-	Base  string `json:"b,omitempty"`
+	Base string `json:"b,omitempty"`
+	// Patch is GitLab's patch ID (patch_id_sha) of the head version: the
+	// same one after a push means the same changes, without asking GitLab
+	// to compare anything. Empty when GitLab had not computed it, and in
+	// the cursors printed by older versions of glcli.
+	Patch string `json:"pi,omitempty"`
 	State string `json:"st"`
 	// MaxNote is the highest note ID seen: note IDs only grow, so notes
 	// above it are new.
@@ -36,10 +41,12 @@ const idPrefix = 12
 // NewCursor captures s.
 func NewCursor(s *Snapshot) Cursor {
 	c := Cursor{MR: s.ID(), SHA: s.MR.SHA, State: s.MR.State, Approvers: s.ApprovedBy()}
-	// The base only goes with the head when both come from the same push.
+	// The base and the patch ID only go with the head when all three come
+	// from the same push.
 	if len(s.Versions) > 0 && !s.Unsettled {
 		c.Version = s.Versions[0].ID
 		c.Base = s.Versions[0].BaseCommitSHA
+		c.Patch = s.Versions[0].PatchIDSHA
 	}
 	for _, d := range s.Discussions {
 		for _, n := range d.Notes {

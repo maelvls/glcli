@@ -29,7 +29,9 @@ type Event struct {
 	PreviousSHA string `json:"previous_sha,omitempty"`
 	// RebaseOnly is true when the changes of the merge request are the
 	// same as before the push (a rebase, or a reword), false when they
-	// differ, and absent when it could not be told (diff too large).
+	// differ, and absent when it could not be told (no patch ID from
+	// GitLab and a diff too large, a binary file, a commit that is gone):
+	// absent counts as a change.
 	RebaseOnly *bool        `json:"rebase_only,omitempty"`
 	BaseMoved  bool         `json:"base_moved,omitempty"`
 	Commits    []CommitView `json:"commits,omitempty"`
@@ -137,18 +139,15 @@ func (d *Differ) Events(ctx context.Context, prev Cursor, s *Snapshot) ([]Event,
 			}
 			if prev.Base != "" {
 				e.BaseMoved = prev.Base != v.BaseCommitSHA
-				a, err := d.hash(ctx, s.MR.ProjectID, prev.Base, prev.SHA)
+			}
+			// A version that is not the head's (a push landed while
+			// fetching) says nothing about this push.
+			if v.HeadCommitSHA == m.SHA && !s.Unsettled {
+				same, err := d.sameChanges(ctx, prev, m.ProjectID, v)
 				if err != nil {
 					return nil, err
 				}
-				b, err := d.hash(ctx, s.MR.ProjectID, v.BaseCommitSHA, v.HeadCommitSHA)
-				if err != nil {
-					return nil, err
-				}
-				if a.known && b.known {
-					same := a.sum == b.sum
-					e.RebaseOnly = &same
-				}
+				e.RebaseOnly = same
 			}
 		}
 		if e.RebaseOnly == nil || !*e.RebaseOnly {
@@ -340,10 +339,42 @@ func (d *Differ) newCommits(ctx context.Context, s *Snapshot, from string) ([]Co
 	return out, nil
 }
 
-// hash returns the patch ID of the changes between base and head. It
-// reads them with the compare API rather than from the merge request's
-// diff versions: GitLab drops the files of every version but the latest
-// (state "without_files"), while it keeps the commits.
+// sameChanges reports whether the changes of the merge request are the
+// same at the cursor and at v, its newest diff version: nil when that
+// cannot be told, which callers must take for a change.
+//
+// GitLab's own patch IDs decide when the cursor carries one, v has one,
+// and the instance computes them with git patch-id --verbatim
+// (gitlab.PatchIDsTrusted): nothing more is asked. Else (an older GitLab,
+// a patch ID not computed, a cursor of an older glcli) the two diffs are
+// read with the compare API and must be identical: see PatchID.
+func (d *Differ) sameChanges(ctx context.Context, prev Cursor, projectID int, v gitlab.Version) (*bool, error) {
+	if prev.Patch != "" && v.PatchIDSHA != "" && gitlab.PatchIDsTrusted(ctx, d.Client, gitlab.VersionTimeout) {
+		same := prev.Patch == v.PatchIDSHA
+		return &same, nil
+	}
+	if prev.Base == "" {
+		return nil, nil
+	}
+	a, err := d.hash(ctx, projectID, prev.Base, prev.SHA)
+	if err != nil {
+		return nil, err
+	}
+	b, err := d.hash(ctx, projectID, v.BaseCommitSHA, v.HeadCommitSHA)
+	if err != nil {
+		return nil, err
+	}
+	if !a.known || !b.known {
+		return nil, nil
+	}
+	same := a.sum == b.sum
+	return &same, nil
+}
+
+// hash returns the hash (see PatchID) of the changes between base and
+// head. It reads them with the compare API rather than from the merge
+// request's diff versions: GitLab drops the files of every version but
+// the latest (state "without_files"), while it keeps the commits.
 func (d *Differ) hash(ctx context.Context, projectID int, base, head string) (patchHash, error) {
 	key := base + ".." + head
 	if h, ok := d.hashes[key]; ok {
