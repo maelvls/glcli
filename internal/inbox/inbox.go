@@ -432,18 +432,24 @@ func unseenPush(s *mr.Snapshot, me string, a activity, trusted func() bool) (at 
 // (the same changes now go to another branch), and whether GitLab took my
 // approval away.
 func doubts(s *mr.Snapshot, me string, seenAt time.Time) (retargeted time.Time, approvalGone bool) {
-	var approved, withdrawn, rerequested time.Time
+	// aware is the last time, not after what I last saw, that my review
+	// was requested or the merge request retargeted: both can remove my
+	// approval without a note of its own.
+	var approved, withdrawn, aware time.Time
 	for _, d := range s.Discussions {
 		for _, n := range d.Notes {
 			if !n.System {
 				continue
 			}
-			if n.CreatedAt.After(seenAt) && (strings.HasPrefix(n.Body, "changed target branch") || strings.Contains(n.Body, "This merge request now targets")) {
-				retargeted = later(retargeted, n.CreatedAt)
+			if strings.HasPrefix(n.Body, "changed target branch") || strings.Contains(n.Body, "This merge request now targets") {
+				if n.CreatedAt.After(seenAt) {
+					retargeted = later(retargeted, n.CreatedAt)
+				} else {
+					aware = later(aware, n.CreatedAt)
+				}
 			}
-			// Requesting my review again removes my approval, without a note.
 			if !n.CreatedAt.After(seenAt) && strings.Contains(n.Body, "requested review from") && mentions(n.Body, me) {
-				rerequested = later(rerequested, n.CreatedAt)
+				aware = later(aware, n.CreatedAt)
 			}
 			if n.Author.Username != me {
 				continue
@@ -460,10 +466,20 @@ func doubts(s *mr.Snapshot, me string, seenAt time.Time) (retargeted time.Time, 
 		return retargeted, false
 	}
 	// I approved and did not take it back, yet I am not among the
-	// approvers: GitLab removed my approval. I know it if, between my
-	// approval and what I last saw, my review was requested again or a
-	// push changed the patch I approved: I acted since without it.
-	if rerequested.After(approved) {
+	// approvers: GitLab removed my approval. Whatever I knew of it, the
+	// changes were others for a while since what I last saw (changed, then
+	// back): that may be what removed it, and I did not act since.
+	saw := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(seenAt) })
+	if saw >= 0 && slices.ContainsFunc(s.Versions, func(v gitlab.Version) bool {
+		return v.CreatedAt.After(seenAt) && v.PatchIDSHA != "" && v.PatchIDSHA != s.Versions[saw].PatchIDSHA
+	}) {
+		return retargeted, true
+	}
+	// Else I know that it is gone if, between my approval and what I last
+	// saw, my review was requested again, the merge request was
+	// retargeted, or a push changed the patch I approved: I acted since
+	// without it.
+	if aware.After(approved) {
 		return retargeted, false
 	}
 	i := slices.IndexFunc(s.Versions, func(v gitlab.Version) bool { return !v.CreatedAt.After(approved) })
