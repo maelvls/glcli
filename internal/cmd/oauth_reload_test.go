@@ -416,78 +416,142 @@ func minuteClock(rt *cli.Runtime) {
 	}
 }
 
-// A wait command started with a token that glab renews while it waits:
-// the poll that gets the 401 reads the new token and goes on, and so do
-// the polls after it. Here "pipeline wait" polls a merge request without
-// a pipeline until --timeout.
-func TestWaitSurvivesATokenRenewal(t *testing.T) {
-	g := &gate{accept: "Authorization: Bearer oauth-OLD-SECRET"}
-	// After the first poll (two requests), the old token expires and glab,
-	// run by someone else, renews it: GitLab only takes the new one.
-	var path string
-	var polls atomic.Int32
-	rt, stdout, stderr, p := fakeGitLabOnDisk(t, g.handler(func(w http.ResponseWriter, r *http.Request) {
-		noPipeline(w, r)
-		if strings.HasSuffix(r.URL.Path, "/pipelines") && polls.Add(1) == 1 {
-			writeGlabConfig(t, path, oauthConfig("oauth-NEW-SECRET", future))
-			g.setAccept("Authorization: Bearer oauth-NEW-SECRET")
+// runningPipeline answers what "pipeline wait group/project!1" reads of a
+// merge request whose head pipeline, 456, is running and stays so: the
+// merge request with its head pipeline, the pipelines of the merge
+// request, the pipeline, its jobs and its trigger jobs. The wait only
+// ends on its --timeout.
+func runningPipeline(w http.ResponseWriter, r *http.Request) {
+	const pipeline = `{"id":456,"project_id":5,"sha":"abc","ref":"feature","status":"running","source":"merge_request_event","web_url":"https://gitlab.com/group/project/-/pipelines/456"}`
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/merge_requests/1"):
+		fmt.Fprint(w, `{"id":10,"iid":1,"project_id":5,"sha":"abc","state":"opened","web_url":"https://gitlab.com/group/project/-/merge_requests/1","head_pipeline":`+pipeline+`}`)
+	case strings.HasSuffix(r.URL.Path, "/merge_requests/1/pipelines"):
+		fmt.Fprint(w, `[`+pipeline+`]`)
+	case strings.HasSuffix(r.URL.Path, "/pipelines/456"):
+		fmt.Fprint(w, pipeline)
+	case strings.HasSuffix(r.URL.Path, "/pipelines/456/jobs"):
+		fmt.Fprint(w, `[{"id":1,"name":"build","stage":"build","status":"running","web_url":"https://gitlab.com/group/project/-/jobs/1"}]`)
+	case strings.HasSuffix(r.URL.Path, "/pipelines/456/bridges"):
+		fmt.Fprint(w, `[]`)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"404 Not found"}`)
+	}
+}
+
+// afterFirstPoll wraps a fake GitLab: it calls then once, before the
+// request that starts the second poll of a wait on the merge request is
+// looked at (the second time the merge request itself is asked for), or
+// before the sixth request if that comes first. It tells then how many
+// requests came before.
+func afterFirstPoll(h http.HandlerFunc, then func(before int)) http.HandlerFunc {
+	var mu sync.Mutex
+	requests, mergeRequests, done := 0, 0, false
+	return func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if strings.HasSuffix(r.URL.Path, "/merge_requests/1") {
+			mergeRequests++
 		}
+		if !done && (mergeRequests == 2 || requests == 5) {
+			done = true
+			then(requests)
+		}
+		requests++
+		mu.Unlock()
+		h(w, r)
+	}
+}
+
+// A wait command started with a token that glab renews while it waits:
+// the request that gets the 401 is made again with the new token, and the
+// polls after it carry the new token. Here "pipeline wait" polls a
+// pipeline that keeps running, until --timeout: the wait ends as if
+// nothing had happened.
+func TestWaitSurvivesATokenRenewal(t *testing.T) {
+	old, renewed := "Authorization: Bearer oauth-OLD-SECRET", "Authorization: Bearer oauth-NEW-SECRET"
+	g := &gate{accept: old}
+	// After the first poll, the old token expires and glab, run by someone
+	// else, renews it: GitLab only takes the new one.
+	var path string
+	var before atomic.Int32
+	before.Store(-1)
+	rt, stdout, stderr, p := fakeGitLabOnDisk(t, afterFirstPoll(g.handler(runningPipeline), func(n int) {
+		before.Store(int32(n))
+		writeGlabConfig(t, path, oauthConfig("oauth-NEW-SECRET", future))
+		g.setAccept(renewed)
 	}), oauthConfig("oauth-OLD-SECRET", future))
 	path = p
 	loads := countLoads(rt)
 	minuteClock(rt)
-	if code := run(rt, []string{"pipeline", "wait", "group/project!1", "--timeout", "10m"}); code != 0 {
+	if code := run(rt, []string{"pipeline", "wait", "group/project!1", "--timeout", "1h"}); code != 0 {
 		t.Fatalf("exit %d (stderr: %s)", code, stderr.String())
 	}
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil || string(got["timed_out"]) != "true" || string(got["running"]) != "true" {
 		t.Errorf("want the result of a wait that timed out, got %s (%v)", stdout.String(), err)
 	}
-	if stderr.Len() != 0 {
-		t.Errorf("nothing expected on stderr, got %s", stderr.String())
+	// The renewal does not show: no 401, no hint, no token.
+	for _, not := range []string{"401", "rejected", "expired", "glab auth", "SECRET"} {
+		if strings.Contains(stderr.String(), not) || strings.Contains(stdout.String(), not) {
+			t.Errorf("%q is not expected in:\n%s%s", not, stderr.String(), stdout.String())
+		}
 	}
 	seen := g.requests()
-	polled := int(polls.Load())
-	if polled < 3 {
-		t.Fatalf("want at least three polls, got %d (%q)", polled, seen)
+	n := int(before.Load())
+	if n < 1 || len(seen) <= n {
+		t.Fatalf("the token was not renewed during the wait: %d requests before, %q", n, seen)
 	}
-	// Two requests with the old token, one rejected, and from then on the
-	// new token only: the 401 happened once.
-	old, renewed := "Authorization: Bearer oauth-OLD-SECRET", "Authorization: Bearer oauth-NEW-SECRET"
-	if len(seen) != 2*polled+1 || !slices.Equal(seen[:3], []string{old, old, old}) {
-		t.Fatalf("got %q", seen)
-	}
-	for _, s := range seen[3:] {
-		if s != renewed {
-			t.Fatalf("after the renewal, every request must carry the new token: got %q", seen)
+	// Before the renewal, the old token. Then the old token once more,
+	// rejected, and from then on the new one, for more than a poll.
+	rejected := 0
+	for i, s := range seen {
+		switch {
+		case s == old && i < n:
+		case s == old:
+			rejected++
+		case s == renewed && i > n:
+		default:
+			t.Fatalf("request %d carried %q (%d requests before the renewal): %q", i+1, s, n, seen)
 		}
+	}
+	t.Logf("%d requests before the renewal, %d rejected, %d with the new token", n, rejected, len(seen)-n-rejected)
+	if rejected == 0 || len(seen)-n-rejected < 8 {
+		t.Errorf("want a rejected request, then at least 8 with the new token, got %d and %d: %q", rejected, len(seen)-n-rejected, seen)
+	}
+	if last := seen[len(seen)-1]; last != renewed {
+		t.Errorf("the last request carried %q, want the new token", last)
 	}
 	if n := loads.Load(); n != 2 {
 		t.Errorf("the config was read %d times, want 2 (once, and once after the 401)", n)
 	}
 }
 
-// The same wait, when nobody ran glab: the poll that gets the 401 ends
+// The same wait, when nobody ran glab: the request that gets the 401 ends
 // the command, with the hint that says how to go on.
 func TestWaitEndsOnAnExpiredTokenWithTheHint(t *testing.T) {
-	g := &gate{accept: "Authorization: Bearer oauth-SECRET"}
-	var polls atomic.Int32
-	rt, stdout, stderr, _ := fakeGitLabOnDisk(t, g.handler(func(w http.ResponseWriter, r *http.Request) {
-		noPipeline(w, r)
-		if strings.HasSuffix(r.URL.Path, "/pipelines") && polls.Add(1) == 1 {
-			g.setAccept("nothing")
-		}
+	old := "Authorization: Bearer oauth-SECRET"
+	g := &gate{accept: old}
+	var before atomic.Int32
+	before.Store(-1)
+	rt, stdout, stderr, _ := fakeGitLabOnDisk(t, afterFirstPoll(g.handler(runningPipeline), func(n int) {
+		before.Store(int32(n))
+		g.setAccept("nothing")
 	}), oauthConfig("oauth-SECRET", past))
 	minuteClock(rt)
-	if code := run(rt, []string{"pipeline", "wait", "group/project!1", "--timeout", "10m"}); code != 1 {
-		t.Fatalf("exit %d, want 1 (stderr: %s)", code, stderr.String())
+	if code := run(rt, []string{"pipeline", "wait", "group/project!1", "--timeout", "1h"}); code != 1 {
+		t.Fatalf("exit %d, want 1 (stdout: %s, stderr: %s)", code, stdout.String(), stderr.String())
 	}
 	got := stderr.String()
 	if !strings.Contains(got, "HTTP 401: 401 Unauthorized\n") || !strings.Contains(got, "the OAuth token of gitlab.com expired at 2020-01-02T03:04:05Z") || !strings.Contains(got, "`glab auth status --hostname gitlab.com`") || strings.Contains(got, "SECRET") {
 		t.Errorf("got:\n%s", got)
 	}
-	if stdout.Len() != 0 || len(g.requests()) != 3 {
-		t.Errorf("want three requests and nothing on stdout, got %q and %s", g.requests(), stdout.String())
+	if stdout.Len() != 0 {
+		t.Errorf("nothing expected on stdout, got %s", stdout.String())
+	}
+	seen, n := g.requests(), int(before.Load())
+	if n < 1 || len(seen) <= n || slices.ContainsFunc(seen, func(s string) bool { return s != old }) {
+		t.Errorf("want the requests of a poll, then a rejected one, all with the token of the config: %d before, %q", n, seen)
 	}
 }
 
