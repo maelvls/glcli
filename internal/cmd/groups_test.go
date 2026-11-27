@@ -2,75 +2,145 @@ package cmd
 
 import (
 	"bytes"
+	"io"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/maelvls/glcli/internal/cli"
 )
 
-// groups are the commands that only hold subcommands.
-var groups = map[string][]string{
-	"mr":       {"discussions", "get", "wait"},
-	"pipeline": {"get", "wait"},
-	"auth":     {"status", "test"},
-	"skills":   {"install", "list"},
+// groups walks the commands of glcli and returns those that only hold
+// subcommands, each as the arguments that lead to it: none for glcli
+// itself. A group added later is found without touching these tests.
+func groups(t *testing.T) [][]string {
+	t.Helper()
+	root := newRoot(cli.New(io.Discard, io.Discard))
+	// cobra adds these two when it executes.
+	root.InitDefaultHelpCmd()
+	root.InitDefaultCompletionCmd()
+
+	var found [][]string
+	var walk func(cmd *cobra.Command, path []string)
+	walk = func(cmd *cobra.Command, path []string) {
+		if cmd.HasSubCommands() && !cmd.Runnable() {
+			found = append(found, path)
+		}
+		for _, sub := range cmd.Commands() {
+			walk(sub, append(slices.Clone(path), sub.Name()))
+		}
+	}
+	walk(root, nil)
+
+	for _, want := range []string{"", "mr", "pipeline", "auth", "skills", "completion"} {
+		if !slices.ContainsFunc(found, func(path []string) bool { return strings.Join(path, " ") == want }) {
+			t.Fatalf("the walk did not find the group %q: %v", want, found)
+		}
+	}
+	return found
 }
 
-func TestGroupUnknownSubcommandExits2(t *testing.T) {
-	for name, subs := range groups {
-		for _, args := range [][]string{
-			{name, "bogus"},
-			{name, "--host", "gitlab.example.com", "bogus"},
-			{name, "bogus", "a/b!1"},
+// groupRun runs glcli with the arguments of a group followed by more.
+func groupRun(group []string, more ...string) (code int, stdout, stderr string) {
+	var out, errOut bytes.Buffer
+	code = Run(append(slices.Clone(group), more...), &out, &errOut)
+	return code, out.String(), errOut.String()
+}
+
+func TestGroupUnknownCommandExits2(t *testing.T) {
+	for _, group := range groups(t) {
+		path := strings.Join(append([]string{"glcli"}, group...), " ")
+		for _, more := range [][]string{
+			{"bogus"},
+			{"bogus", "a/b!1"},
+			{"--host", "gitlab.example.com", "bogus"},
+			{"bogus", "--host", "gitlab.example.com"},
 		} {
-			var stdout, stderr bytes.Buffer
-			if code := Run(args, &stdout, &stderr); code != 2 {
-				t.Errorf("%v: exit %d, want 2 (stderr: %s)", args, code, stderr.String())
+			code, stdout, stderr := groupRun(group, more...)
+			if code != 2 {
+				t.Errorf("%s %v: exit %d, want 2 (stderr: %s)", path, more, code, stderr)
 			}
-			if stdout.Len() != 0 {
-				t.Errorf("%v: stdout is not empty: %s", args, stdout.String())
+			if stdout != "" {
+				t.Errorf("%s %v: stdout is not empty: %s", path, more, stdout)
 			}
-			want := `glcli: unknown command "bogus" for "glcli ` + name + `": use `
-			if !strings.HasPrefix(stderr.String(), want) {
-				t.Errorf("%v: stderr is %q, want it to start with %q", args, stderr.String(), want)
-			}
-			for _, sub := range subs {
-				if !strings.Contains(stderr.String(), sub) {
-					t.Errorf("%v: stderr does not name the subcommand %q: %s", args, sub, stderr.String())
-				}
+			want := `glcli: unknown command "bogus" for "` + path + `"`
+			if !strings.HasPrefix(stderr, want) {
+				t.Errorf("%s %v: stderr is %q, want it to start with %q", path, more, stderr, want)
 			}
 		}
 	}
 }
 
-func TestGroupUnknownSubcommandMessage(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	Run([]string{"mr", "list"}, &stdout, &stderr)
-	want := `glcli: unknown command "list" for "glcli mr": use discussions, get or wait (see glcli mr --help)` + "\n"
-	if stderr.String() != want {
-		t.Errorf("stderr is %q, want %q", stderr.String(), want)
+func TestGroupUnknownCommandMessage(t *testing.T) {
+	for want, args := range map[string][]string{
+		`glcli: unknown command "list" for "glcli mr": use discussions, get or wait (see glcli mr --help)`:                       {"mr", "list"},
+		`glcli: unknown command "bogus" for "glcli pipeline": use get or wait (see glcli pipeline --help)`:                       {"pipeline", "bogus"},
+		`glcli: unknown command "bogus" for "glcli auth": use status or test (see glcli auth --help)`:                            {"auth", "bogus"},
+		`glcli: unknown command "nope" for "glcli skills": use install or list (see glcli skills --help)`:                        {"skills", "nope"},
+		`glcli: unknown command "bogus" for "glcli completion": use bash, fish, powershell or zsh (see glcli completion --help)`: {"completion", "bogus"},
+	} {
+		code, stdout, stderr := groupRun(args)
+		if code != 2 || stdout != "" || stderr != want+"\n" {
+			t.Errorf("%v: exit %d, stdout %q, stderr %q, want exit 2, no stdout and stderr %q", args, code, stdout, stderr, want+"\n")
+		}
 	}
 }
 
-func TestBareGroupPrintsHelp(t *testing.T) {
-	for name := range groups {
-		var bare, stderr bytes.Buffer
-		if code := Run([]string{name}, &bare, &stderr); code != 0 {
-			t.Errorf("%s: exit %d, want 0 (stderr: %s)", name, code, stderr.String())
-		}
-		if stderr.Len() != 0 {
-			t.Errorf("%s: stderr is not empty: %s", name, stderr.String())
+// After "--", cobra does not look for a command: the word is still not one
+// that glcli can run.
+func TestUnknownCommandAfterDoubleDashExits2(t *testing.T) {
+	code, stdout, stderr := groupRun(nil, "--", "bogus")
+	if code != 2 || stdout != "" || !strings.HasPrefix(stderr, `glcli: unknown command "bogus" for "glcli"`) {
+		t.Errorf("exit %d, stdout %q, stderr %q, want exit 2, no stdout and an unknown command on stderr", code, stdout, stderr)
+	}
+}
+
+func TestGroupHelp(t *testing.T) {
+	for _, group := range groups(t) {
+		path := strings.Join(append([]string{"glcli"}, group...), " ")
+
+		code, bare, stderr := groupRun(group)
+		if code != 0 || stderr != "" {
+			t.Errorf("%s: exit %d, stderr %q, want exit 0 and no stderr", path, code, stderr)
 		}
 		// The only usage line is the one of a group.
-		usage := "Usage:\n  glcli " + name + " [command]\n\n"
-		if !strings.Contains(bare.String(), usage) {
-			t.Errorf("%s: the help does not have %q: %s", name, usage, bare.String())
+		usage := "Usage:\n  " + path + " [command]\n\n"
+		if !strings.Contains(bare, usage) {
+			t.Errorf("%s: the help does not have %q: %s", path, usage, bare)
 		}
 
-		var help bytes.Buffer
-		if code := Run([]string{name, "--help"}, &help, &stderr); code != 0 {
-			t.Errorf("%s --help: exit %d, want 0 (stderr: %s)", name, code, stderr.String())
+		for _, args := range [][]string{
+			append(slices.Clone(group), "--help"),
+			append(slices.Clone(group), "-h"),
+			append(slices.Clone(group), "help"),
+			append([]string{"help"}, group...),
+		} {
+			code, stdout, stderr := groupRun(args)
+			if code != 0 || stderr != "" {
+				t.Errorf("glcli %v: exit %d, stderr %q, want exit 0 and no stderr", args, code, stderr)
+			}
+			if stdout != bare {
+				t.Errorf("glcli %v prints %q, want the same as %s alone: %q", args, stdout, path, bare)
+			}
 		}
-		if help.String() != bare.String() {
-			t.Errorf("%s --help prints %q, want the same as %s alone: %q", name, help.String(), name, bare.String())
+	}
+}
+
+// What asks for help wins over an unknown word.
+func TestGroupHelpWithMoreWords(t *testing.T) {
+	_, want, _ := groupRun([]string{"mr", "--help"})
+	for _, args := range [][]string{
+		{"mr", "bogus", "--help"},
+		{"mr", "--help", "bogus"},
+		{"mr", "bogus", "-h"},
+		{"mr", "help", "get"},
+		{"mr", "help", "bogus"},
+	} {
+		code, stdout, stderr := groupRun(args)
+		if code != 0 || stderr != "" || stdout != want {
+			t.Errorf("glcli %v: exit %d, stderr %q, stdout %q, want exit 0, no stderr and the help of mr", args, code, stderr, stdout)
 		}
 	}
 }

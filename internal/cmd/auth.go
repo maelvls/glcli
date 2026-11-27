@@ -67,5 +67,5 @@ func newAuth(rt *cli.Runtime) *cobra.Command {
 			}{c.Host.Name, u.Username, u.Name})
 		},
 	})
-	return group(cmd)
+	return cmd
 }

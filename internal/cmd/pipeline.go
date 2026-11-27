@@ -24,7 +24,7 @@ func newPipeline(rt *cli.Runtime) *cobra.Command {
 		Short: "Read and wait on pipelines",
 	}
 	cmd.AddCommand(newPipelineGet(rt), newPipelineWait(rt))
-	return group(cmd)
+	return cmd
 }
 
 type pipelineFlags struct {

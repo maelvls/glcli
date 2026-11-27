@@ -87,5 +87,5 @@ installed, replaced or skipped. Run it again after upgrading glcli, with
 	install.Flags().StringVar(&dir, "dir", "", "Skills directory to install into (default ~/.claude/skills)")
 	install.Flags().BoolVar(&overwrite, "overwrite", false, "Replace skills that are already installed")
 	cmd.AddCommand(install)
-	return group(cmd)
+	return cmd
 }
