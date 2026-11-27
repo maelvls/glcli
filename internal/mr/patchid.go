@@ -20,10 +20,11 @@ import (
 // only when they are identical: a change never passes for a rebase.
 //
 // The price is that some rebases read as changes: git patch-id leaves
-// the line numbers out, so it keeps its ID when the target branch added
-// lines above a hunk, in the same file; this hash does not. Like git
-// patch-id, it changes when the target branch changed the context lines
-// of a hunk.
+// the hunk headers out, so it keeps its ID when the target branch added
+// or removed lines anywhere above a hunk, in the same file, or changed
+// the heading of a hunk (the line of the enclosing function, even out
+// of the context lines); this hash does not. Like git patch-id, it
+// changes when the target branch changed the context lines of a hunk.
 //
 // known is false when the changes cannot be seen: see visible.
 func PatchID(diffs []gitlab.VersionDiff) (sum string, known bool) {

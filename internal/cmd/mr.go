@@ -152,10 +152,13 @@ state when the command starts. Kinds of events, selected with --on:
 A push is a rebase when GitLab's patch ID of the merge request (git
 patch-id of its changes) is the same before and after. This needs
 GitLab 18.2 or newer, whose patch IDs see whitespace, and a cursor that
-carries one. Without it (older GitLab, a cursor printed by an older
-glcli) glcli compares the two diffs itself, and they must be identical:
-a rebase onto a target branch that moved or changed the lines around a
-change then counts as a push.
+carries one. One change still passes for a rebase: a push that rebases
+and also moves a change to another place of its file, where the lines
+around it are the same. Without patch IDs (older GitLab, a cursor
+printed by an older glcli) glcli compares the two diffs itself, and they
+must be identical: a rebase onto a target branch that added or removed
+lines anywhere above a change in the same file, or changed the lines
+next to it, then counts as a push.
 
 --on defaults to push,comment,thread,approval,state. What I did myself
 (my push, my approval, my resolve, my merge, my close) does not end the
